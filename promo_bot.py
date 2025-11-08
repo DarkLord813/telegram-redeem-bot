@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+"""
+Telegram Promotion Manager Bot - Single File Version for Render
+"""
+
 import os
 import logging
 import sqlite3
@@ -189,11 +194,13 @@ def keep_alive():
                     logger.info(f"Keep-alive ping to localhost:{PORT}: {response.status_code}")
                 
                 # Sleep for 5 minutes (300 seconds)
-                asyncio.run(asyncio.sleep(300))
+                import time
+                time.sleep(300)
             except Exception as e:
                 logger.error(f"Keep-alive error: {e}")
                 # Retry after 2 minutes on error
-                asyncio.run(asyncio.sleep(120))
+                import time
+                time.sleep(120)
     
     thread = Thread(target=run)
     thread.daemon = True
@@ -600,7 +607,9 @@ def main():
     
     # Start the Telegram bot
     logger.info("Telegram bot is starting...")
-    application.run_polling(drop_pending_updates=True)
+    
+    # Use run_polling without the problematic parameter
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
