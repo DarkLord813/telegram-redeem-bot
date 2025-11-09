@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-Telegram Promotion Manager Bot - Single File Version for Render
-"""
-
 import os
 import logging
 import sqlite3
