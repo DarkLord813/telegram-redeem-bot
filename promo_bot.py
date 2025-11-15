@@ -628,6 +628,7 @@ class PromotionBot:
                 'year': {'stars': 300, 'days': 365}
             }
             
+            # Create application with modern approach
             self.application = Application.builder().token(self.token).build()
             self.setup_handlers()
             
@@ -870,7 +871,6 @@ Choose an option below to get started:
             health_status += "• Bot API: ❌ Connection failed\n"
         
         health_status += f"\n🕒 Uptime: {self.get_uptime()}"
-        health_status += f"\n📊 Memory: {self.get_memory_usage()}"
         
         await update.message.reply_text(health_status, parse_mode='Markdown')
     
@@ -883,16 +883,6 @@ Choose an option below to get started:
             minutes, seconds = divmod(remainder, 60)
             return f"{days}d {hours}h {minutes}m {seconds}s"
         return "Unknown"
-    
-    def get_memory_usage(self):
-        """Get memory usage"""
-        try:
-            import psutil
-            process = psutil.Process()
-            memory_mb = process.memory_info().rss / 1024 / 1024
-            return f"{memory_mb:.1f} MB"
-        except:
-            return "N/A"
     
     async def list_target_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """List all target channels"""
@@ -1572,7 +1562,25 @@ Your promotion will be activated automatically after payment verification.
             )
         
         logging.info("🤖 Starting Promotion Bot with all features...")
-        await self.application.run_polling()
+        
+        # Start the bot with proper error handling
+        try:
+            await self.application.initialize()
+            await self.application.start()
+            await self.application.updater.start_polling()
+            
+            # Keep the bot running
+            while True:
+                await asyncio.sleep(3600)  # Sleep for 1 hour
+                
+        except Exception as e:
+            logging.error(f"Bot runtime error: {e}")
+        finally:
+            # Clean shutdown
+            if self.application.updater:
+                await self.application.updater.stop()
+            await self.application.stop()
+            await self.application.shutdown()
 
 def main():
     try:
