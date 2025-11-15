@@ -41,7 +41,7 @@ This bot is designed for **LEGITIMATE PROMOTION SERVICES ONLY**. It does NOT:
 - GitHub Personal Access Token
 - Telegram channel @worldwidepromotion1
 
-  ## Contributing 🤝
+## Contributing 🤝
 1. Fork the repository 
 2. Create a feature branch
 3. Make your changes
