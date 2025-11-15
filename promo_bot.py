@@ -1578,24 +1578,8 @@ Your promotion will be activated automatically after payment verification.
         
         logging.info("🤖 Starting Promotion Bot with all features...")
         
-        # Start the bot with proper error handling
-        try:
-            await self.application.initialize()
-            await self.application.start()
-            await self.application.updater.start_polling()
-            
-            # Keep the bot running
-            while True:
-                await asyncio.sleep(3600)  # Sleep for 1 hour
-                
-        except Exception as e:
-            logging.error(f"Bot runtime error: {e}")
-        finally:
-            # Clean shutdown
-            if self.application.updater:
-                await self.application.updater.stop()
-            await self.application.stop()
-            await self.application.shutdown()
+        # Use the simple modern approach - this should work with python-telegram-bot v20+
+        await self.application.run_polling()
 
 def main():
     try:
