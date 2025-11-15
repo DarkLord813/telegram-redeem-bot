@@ -24,13 +24,13 @@ This bot is designed for **LEGITIMATE PROMOTION SERVICES ONLY**. It does NOT:
 
 ## Pricing Plans
 
-| Subscribers | Stars Required|
+| Duration    | Stars Required|
 |-------------|---------------|
-| 500         | 50 ⭐         |
-| 1,000       | 100 ⭐        |
-| 3,000       | 150 ⭐        |
-| 5,000       | 200 ⭐        |
-| 10,000      | 350 ⭐        |  
+| 1 Week      | 10 ⭐         |
+| 1 Month     | 30 ⭐        |
+| 3 Months    | 80 ⭐        |
+| 6 Months    | 160 ⭐        |
+| 1 Year      | 300 ⭐        |  
 
 ## 🚀 Quick Start
 
@@ -40,6 +40,13 @@ This bot is designed for **LEGITIMATE PROMOTION SERVICES ONLY**. It does NOT:
 - Telegram Bot Token from [@BotFather](https://t.me/BotFather)
 - GitHub Personal Access Token
 - Telegram channel @worldwidepromotion1
+
+  ## Contributing 🤝
+1. Fork the repository 
+2. Create a feature branch
+3. Make your changes
+4. Test thoroughly
+5. Submit a pull request
 
 ### Environment Variables
 
@@ -62,9 +69,3 @@ TARGET_CHANNELS=-100123456789,-100987654321
 ```bash
 git clone https://github.com/yourusername/telegram-promotion-bot.git
 cd telegram-promotion-bot
-
-## Contributing 🤝
-1. Fork the repository 
-2. Create a feature branch
-3. Test thoroughly
-4. Submit a pull request
