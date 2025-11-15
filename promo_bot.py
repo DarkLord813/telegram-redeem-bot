@@ -29,113 +29,119 @@ class Database:
             raise
     
     def init_db(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Channels table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS channels (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                channel_id INTEGER UNIQUE,
-                channel_username TEXT,
-                channel_title TEXT,
-                owner_id INTEGER,
-                promotion_start DATETIME,
-                promotion_end DATETIME,
-                status TEXT DEFAULT 'active',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Admins table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS admins (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER UNIQUE,
-                username TEXT,
-                added_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Payments table (for star payments)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS payments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                channel_id INTEGER,
-                amount INTEGER,
-                duration TEXT,
-                status TEXT DEFAULT 'pending',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # User join status table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS user_joins (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                channel_id INTEGER,
-                joined BOOLEAN DEFAULT FALSE,
-                checked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id, channel_id)
-            )
-        ''')
-        
-        # Target channels table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS target_channels (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                channel_id INTEGER UNIQUE,
-                channel_username TEXT,
-                channel_title TEXT,
-                added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                auto_added BOOLEAN DEFAULT TRUE
-            )
-        ''')
-        
-        # Promotion messages table (to track and delete messages)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS promotion_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                channel_id INTEGER,
-                message_id INTEGER,
-                posted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                delete_at DATETIME,
-                status TEXT DEFAULT 'active'
-            )
-        ''')
-        
-        # Insert default admin if specified
-        admin_ids = os.getenv('ADMIN_USER_IDS', '')
-        if admin_ids:
-            for admin_id in admin_ids.split(','):
-                if admin_id.strip():
-                    try:
-                        cursor.execute('''
-                            INSERT OR IGNORE INTO admins (user_id, username) 
-                            VALUES (?, ?)
-                        ''', (int(admin_id.strip()), 'default_admin'))
-                        logging.info(f"✅ Added admin: {admin_id}")
-                    except Exception as e:
-                        logging.error(f"❌ Error adding admin {admin_id}: {e}")
-        
-        # Insert initial target channels from environment
-        target_channels = os.getenv('TARGET_CHANNELS', '')
-        if target_channels:
-            for channel_id in target_channels.split(','):
-                if channel_id.strip():
-                    try:
-                        cursor.execute('''
-                            INSERT OR IGNORE INTO target_channels (channel_id, auto_added) 
-                            VALUES (?, ?)
-                        ''', (channel_id.strip(), False))
-                        logging.info(f"✅ Added target channel: {channel_id}")
-                    except Exception as e:
-                        logging.error(f"❌ Error adding target channel {channel_id}: {e}")
-        
-        conn.commit()
-        conn.close()
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Channels table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS channels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    channel_id INTEGER UNIQUE,
+                    channel_username TEXT,
+                    channel_title TEXT,
+                    owner_id INTEGER,
+                    promotion_start DATETIME,
+                    promotion_end DATETIME,
+                    status TEXT DEFAULT 'active',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Admins table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS admins (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER UNIQUE,
+                    username TEXT,
+                    added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Payments table (for star payments)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    channel_id INTEGER,
+                    amount INTEGER,
+                    duration TEXT,
+                    status TEXT DEFAULT 'pending',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # User join status table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS user_joins (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    channel_id INTEGER,
+                    joined BOOLEAN DEFAULT FALSE,
+                    checked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, channel_id)
+                )
+            ''')
+            
+            # Target channels table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS target_channels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    channel_id INTEGER UNIQUE,
+                    channel_username TEXT,
+                    channel_title TEXT,
+                    added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    auto_added BOOLEAN DEFAULT TRUE
+                )
+            ''')
+            
+            # Promotion messages table (to track and delete messages)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS promotion_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    channel_id INTEGER,
+                    message_id INTEGER,
+                    posted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    delete_at DATETIME,
+                    status TEXT DEFAULT 'active'
+                )
+            ''')
+            
+            # Insert default admin if specified
+            admin_ids = os.getenv('ADMIN_USER_IDS', '')
+            if admin_ids:
+                for admin_id in admin_ids.split(','):
+                    if admin_id.strip():
+                        try:
+                            cursor.execute('''
+                                INSERT OR IGNORE INTO admins (user_id, username) 
+                                VALUES (?, ?)
+                            ''', (int(admin_id.strip()), 'default_admin'))
+                            logging.info(f"✅ Added admin: {admin_id}")
+                        except Exception as e:
+                            logging.error(f"❌ Error adding admin {admin_id}: {e}")
+            
+            # Insert initial target channels from environment
+            target_channels = os.getenv('TARGET_CHANNELS', '')
+            if target_channels:
+                for channel_id in target_channels.split(','):
+                    if channel_id.strip():
+                        try:
+                            cursor.execute('''
+                                INSERT OR IGNORE INTO target_channels (channel_id, auto_added) 
+                                VALUES (?, ?)
+                            ''', (channel_id.strip(), False))
+                            logging.info(f"✅ Added target channel: {channel_id}")
+                        except Exception as e:
+                            logging.error(f"❌ Error adding target channel {channel_id}: {e}")
+            
+            conn.commit()
+            conn.close()
+            logging.info("✅ Database tables created successfully")
+            
+        except Exception as e:
+            logging.error(f"❌ Database initialization failed: {e}")
+            raise
     
     def add_channel(self, channel_id, channel_username, channel_title, owner_id, duration_days):
         conn = sqlite3.connect(self.db_path)
@@ -480,21 +486,26 @@ class Database:
 
 class GitHubBackup:
     def __init__(self):
-        self.token = os.getenv('GITHUB_TOKEN')
-        self.repo_owner = os.getenv('GITHUB_REPO_OWNER')
-        self.repo_name = os.getenv('GITHUB_REPO_NAME')
-        self.backup_path = os.getenv('GITHUB_BACKUP_PATH', 'backups/promotion_bot.db')
-        self.branch = os.getenv('GITHUB_BACKUP_BRANCH', 'main')
-        self.base_url = f"https://api.github.com/repos/{self.repo_owner}/{self.repo_name}/contents"
-        
-        # Log GitHub configuration status
-        if self.token and self.repo_owner and self.repo_name:
-            logging.info("✅ GitHub backup configured")
-        else:
-            logging.warning("⚠️ GitHub backup not fully configured")
+        try:
+            self.token = os.getenv('GITHUB_TOKEN')
+            self.repo_owner = os.getenv('GITHUB_REPO_OWNER')
+            self.repo_name = os.getenv('GITHUB_REPO_NAME')
+            self.backup_path = os.getenv('GITHUB_BACKUP_PATH', 'backups')
+            self.branch = os.getenv('GITHUB_BACKUP_BRANCH', 'main')
+            
+            # Log GitHub configuration status
+            if self.token and self.repo_owner and self.repo_name:
+                self.base_url = f"https://api.github.com/repos/{self.repo_owner}/{self.repo_name}/contents"
+                logging.info("✅ GitHub backup configured")
+            else:
+                self.base_url = None
+                logging.warning("⚠️ GitHub backup not fully configured")
+        except Exception as e:
+            logging.error(f"❌ GitHubBackup initialization failed: {e}")
+            self.base_url = None
     
     def backup_database(self, database_export):
-        if not self.token:
+        if not self.token or not self.base_url:
             logging.warning("GitHub token not available, skipping backup")
             return False
             
@@ -565,7 +576,7 @@ class GitHubBackup:
             logging.error(f"Directory creation error: {e}")
     
     def load_latest_backup(self):
-        if not self.token:
+        if not self.token or not self.base_url:
             return None
             
         try:
@@ -613,7 +624,10 @@ class PromotionBot:
             self.required_channels = self.get_required_channels()
             logging.info(f"✅ Required channels: {len(self.required_channels)}")
             
+            # Initialize database first
             self.db = Database()
+            
+            # Initialize GitHub backup
             self.github_backup = GitHubBackup()
             
             # Auto-load latest backup on startup
@@ -636,6 +650,7 @@ class PromotionBot:
             
         except Exception as e:
             logging.error(f"❌ Failed to initialize PromotionBot: {e}")
+            logging.error(traceback.format_exc())
             raise
     
     def get_required_channels(self):
