@@ -4,9 +4,11 @@ import json
 import base64
 import logging
 import asyncio
+import aiohttp
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.error import TelegramError
 import requests
 
 # Configure logging
@@ -74,6 +76,30 @@ class Database:
             )
         ''')
         
+        # Target channels table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS target_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER UNIQUE,
+                channel_username TEXT,
+                channel_title TEXT,
+                added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                auto_added BOOLEAN DEFAULT TRUE
+            )
+        ''')
+        
+        # Promotion messages table (to track and delete messages)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS promotion_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER,
+                message_id INTEGER,
+                posted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                delete_at DATETIME,
+                status TEXT DEFAULT 'active'
+            )
+        ''')
+        
         # Insert default admin if specified
         admin_ids = os.getenv('ADMIN_USER_IDS', '')
         if admin_ids:
@@ -83,6 +109,16 @@ class Database:
                         INSERT OR IGNORE INTO admins (user_id, username) 
                         VALUES (?, ?)
                     ''', (int(admin_id.strip()), 'default_admin'))
+        
+        # Insert initial target channels from environment
+        target_channels = os.getenv('TARGET_CHANNELS', '')
+        if target_channels:
+            for channel_id in target_channels.split(','):
+                if channel_id.strip():
+                    cursor.execute('''
+                        INSERT OR IGNORE INTO target_channels (channel_id, auto_added) 
+                        VALUES (?, ?)
+                    ''', (channel_id.strip(), False))
         
         conn.commit()
         conn.close()
@@ -230,6 +266,100 @@ class Database:
         
         return result[0] if result else False
     
+    def add_target_channel(self, channel_id, channel_username=None, channel_title=None):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                INSERT OR REPLACE INTO target_channels 
+                (channel_id, channel_username, channel_title, auto_added)
+                VALUES (?, ?, ?, ?)
+            ''', (channel_id, channel_username, channel_title, True))
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error adding target channel: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def get_target_channels(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT * FROM target_channels')
+        channels = cursor.fetchall()
+        conn.close()
+        return channels
+    
+    def remove_target_channel(self, channel_id):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('DELETE FROM target_channels WHERE channel_id = ?', (channel_id,))
+        conn.commit()
+        conn.close()
+    
+    def add_promotion_message(self, channel_id, message_id):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        delete_at = datetime.now() + timedelta(hours=5)
+        
+        try:
+            cursor.execute('''
+                INSERT INTO promotion_messages 
+                (channel_id, message_id, delete_at)
+                VALUES (?, ?, ?)
+            ''', (channel_id, message_id, delete_at))
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error adding promotion message: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def get_promotion_messages_to_delete(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM promotion_messages 
+            WHERE delete_at <= datetime('now') AND status = 'active'
+        ''')
+        
+        messages = cursor.fetchall()
+        conn.close()
+        return messages
+    
+    def mark_message_deleted(self, message_id):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            UPDATE promotion_messages SET status = 'deleted' 
+            WHERE message_id = ?
+        ''', (message_id,))
+        
+        conn.commit()
+        conn.close()
+    
+    def cleanup_old_messages(self):
+        """Clean up messages older than 7 days"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cutoff_date = datetime.now() - timedelta(days=7)
+        cursor.execute('''
+            DELETE FROM promotion_messages 
+            WHERE posted_at < ?
+        ''', (cutoff_date,))
+        
+        conn.commit()
+        conn.close()
+    
     def export_data(self):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -250,6 +380,14 @@ class Database:
         cursor.execute('SELECT * FROM user_joins')
         user_joins = cursor.fetchall()
         
+        # Export target channels
+        cursor.execute('SELECT * FROM target_channels')
+        target_channels = cursor.fetchall()
+        
+        # Export promotion messages
+        cursor.execute('SELECT * FROM promotion_messages')
+        promotion_messages = cursor.fetchall()
+        
         conn.close()
         
         return {
@@ -257,6 +395,8 @@ class Database:
             'admins': admins,
             'payments': payments,
             'user_joins': user_joins,
+            'target_channels': target_channels,
+            'promotion_messages': promotion_messages,
             'exported_at': datetime.now().isoformat()
         }
     
@@ -270,6 +410,8 @@ class Database:
             cursor.execute('DELETE FROM admins')
             cursor.execute('DELETE FROM payments')
             cursor.execute('DELETE FROM user_joins')
+            cursor.execute('DELETE FROM target_channels')
+            cursor.execute('DELETE FROM promotion_messages')
             
             # Import channels
             for channel in data.get('channels', []):
@@ -300,6 +442,20 @@ class Database:
                     VALUES (?, ?, ?, ?, ?)
                 ''', user_join)
             
+            # Import target channels
+            for target_channel in data.get('target_channels', []):
+                cursor.execute('''
+                    INSERT INTO target_channels (id, channel_id, channel_username, channel_title, added_at, auto_added)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', target_channel)
+            
+            # Import promotion messages
+            for message in data.get('promotion_messages', []):
+                cursor.execute('''
+                    INSERT INTO promotion_messages (id, channel_id, message_id, posted_at, delete_at, status)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', message)
+            
             conn.commit()
             return True
         except Exception as e:
@@ -309,11 +465,13 @@ class Database:
             conn.close()
 
 class GitHubBackup:
-    def __init__(self, token, repo_owner, repo_name):
-        self.token = token
-        self.repo_owner = repo_owner
-        self.repo_name = repo_name
-        self.base_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/contents"
+    def __init__(self):
+        self.token = os.getenv('GITHUB_TOKEN')
+        self.repo_owner = os.getenv('GITHUB_REPO_OWNER')
+        self.repo_name = os.getenv('GITHUB_REPO_NAME')
+        self.backup_path = os.getenv('GITHUB_BACKUP_PATH', 'backups/promotion_bot.db')
+        self.branch = os.getenv('GITHUB_BACKUP_BRANCH', 'main')
+        self.base_url = f"https://api.github.com/repos/{self.repo_owner}/{self.repo_name}/contents"
     
     def backup_database(self, database_export):
         try:
@@ -324,7 +482,7 @@ class GitHubBackup:
             
             # Create filename with timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"backup_{timestamp}.json"
+            filename = f"{self.backup_path}/backup_{timestamp}.json"
             
             # Prepare API request
             headers = {
@@ -335,8 +493,11 @@ class GitHubBackup:
             data = {
                 "message": f"Database backup {timestamp}",
                 "content": data_b64,
-                "branch": "main"
+                "branch": self.branch
             }
+            
+            # Ensure backup directory exists
+            self._ensure_backup_directory(headers)
             
             response = requests.put(
                 f"{self.base_url}/{filename}",
@@ -350,6 +511,30 @@ class GitHubBackup:
             print(f"Backup error: {e}")
             return False
     
+    def _ensure_backup_directory(self, headers):
+        """Ensure the backup directory exists in the repo"""
+        try:
+            dir_path = self.backup_path.split('/')[0]
+            response = requests.get(
+                f"{self.base_url}/{dir_path}",
+                headers=headers
+            )
+            
+            if response.status_code == 404:
+                # Create directory
+                data = {
+                    "message": f"Create {dir_path} directory",
+                    "content": base64.b64encode(b" ").decode('utf-8'),
+                    "branch": self.branch
+                }
+                requests.put(
+                    f"{self.base_url}/{dir_path}/.gitkeep",
+                    headers=headers,
+                    json=data
+                )
+        except Exception as e:
+            print(f"Directory creation error: {e}")
+    
     def load_latest_backup(self):
         try:
             headers = {
@@ -357,8 +542,8 @@ class GitHubBackup:
                 "Accept": "application/vnd.github.v3+json"
             }
             
-            # Get repository contents
-            response = requests.get(self.base_url, headers=headers)
+            # Get repository contents in backup directory
+            response = requests.get(f"{self.base_url}/{self.backup_path}", headers=headers)
             if response.status_code != 200:
                 return None
             
@@ -384,22 +569,13 @@ class GitHubBackup:
 
 class PromotionBot:
     def __init__(self):
-        self.token = os.getenv('TELEGRAM_BOT_TOKEN')
+        self.token = os.getenv('BOT_TOKEN')
         self.required_channels = self.get_required_channels()
         self.db = Database()
+        self.github_backup = GitHubBackup()
         
-        # GitHub backup configuration
-        github_token = os.getenv('GITHUB_TOKEN')
-        repo_owner = os.getenv('GITHUB_REPO_OWNER')
-        repo_name = os.getenv('GITHUB_REPO_NAME')
-        
-        if all([github_token, repo_owner, repo_name]):
-            self.github_backup = GitHubBackup(github_token, repo_owner, repo_name)
-            # Auto-load latest backup on startup
-            self.load_backup_on_startup()
-        else:
-            self.github_backup = None
-            logging.warning("GitHub backup not configured")
+        # Auto-load latest backup on startup
+        self.load_backup_on_startup()
         
         # Pricing configuration
         self.pricing = {
@@ -415,13 +591,9 @@ class PromotionBot:
     
     def get_required_channels(self):
         """Get list of channels that users must join"""
-        # Hardcoded channel - @worldwidepromotion1
-        # You'll need to get the channel ID for @worldwidepromotion1
-        # You can get it by forwarding a message from the channel to @userinfobot
-        # Or use your own method to get the channel ID
         channels = [
             {
-                'id': '-1002140264322',  # Replace with actual channel ID for @worldwidepromotion1
+                'id': '-1003429273795',  # Your channel ID for @worldwidepromotion1
                 'username': 'worldwidepromotion1'
             }
         ]
@@ -489,6 +661,8 @@ class PromotionBot:
         self.application.add_handler(CommandHandler("backup", self.manual_backup))
         self.application.add_handler(CommandHandler("stats", self.stats))
         self.application.add_handler(CommandHandler("check_join", self.check_join))
+        self.application.add_handler(CommandHandler("health", self.health_check))
+        self.application.add_handler(CommandHandler("targets", self.list_target_channels))
         
         # Callback query handlers
         self.application.add_handler(CallbackQueryHandler(self.button_handler))
@@ -496,6 +670,9 @@ class PromotionBot:
         # Message handler for channel posts and payments
         self.application.add_handler(MessageHandler(filters.FORWARDED, self.handle_forwarded_message))
         self.application.add_handler(MessageHandler(filters.ALL, self.handle_message))
+        
+        # Handler for when bot is added to a channel
+        self.application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, self.handle_bot_added_to_channel))
     
     async def check_join_requirement(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Check if user has joined required channels"""
@@ -543,6 +720,16 @@ class PromotionBot:
             return
         
         user = update.effective_user
+        
+        keyboard = [
+            [InlineKeyboardButton("🚀 Promote Channel", callback_data="main_promote")],
+            [InlineKeyboardButton("📊 View Statistics", callback_data="main_stats")],
+            [InlineKeyboardButton("💰 Pricing", callback_data="main_pricing")],
+            [InlineKeyboardButton("🛠️ Admin Panel", callback_data="main_admin")],
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         welcome_text = f"""
 👋 Welcome {user.first_name} to Promotion Bot!
 
@@ -554,23 +741,19 @@ class PromotionBot:
 • Automatic promotion across networks
 • Duration-based pricing
 
-💰 **Pricing:**
-• 🕐 1 Week - 10 Stars
-• 📅 1 Month - 30 Stars  
-• 🗓️ 3 Months - 80 Stars
-• 📆 6 Months - 160 Stars
-• 🎊 1 Year - 300 Stars
-
-Use /promote to start promoting your channel!
+Choose an option below to get started:
         """
         
-        await update.message.reply_text(welcome_text)
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup)
     
     async def promote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Check if user has joined required channels
         if not await self.check_join_requirement(update, context):
             return
         
+        await self.show_promotion_menu(update, context)
+    
+    async def show_promotion_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [
             [
                 InlineKeyboardButton("1 Week - 10⭐", callback_data="promo_week"),
@@ -582,16 +765,18 @@ Use /promote to start promoting your channel!
             ],
             [
                 InlineKeyboardButton("1 Year - 300⭐", callback_data="promo_year"),
-            ]
+            ],
+            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="main_menu")]
         ]
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update.message.reply_text(
-            "🎯 Choose promotion duration:\n\n"
-            "After selection, forward a message from your channel or send your channel username.",
-            reply_markup=reply_markup
-        )
+        text = "🎯 **Choose Promotion Duration**\n\nSelect how long you want to promote your channel:"
+        
+        if update.callback_query:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
     
     async def check_join(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Manual command to check join status"""
@@ -609,6 +794,78 @@ Use /promote to start promoting your channel!
         else:
             await self.show_join_required_message(update, not_joined)
     
+    async def health_check(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Health check command"""
+        health_status = "✅ **Bot Health Status**\n\n"
+        
+        # Check database
+        try:
+            active_channels = len(self.db.get_active_channels())
+            health_status += f"• Database: ✅ Connected ({active_channels} active promotions)\n"
+        except:
+            health_status += "• Database: ❌ Connection failed\n"
+        
+        # Check GitHub backup
+        try:
+            if self.github_backup.load_latest_backup():
+                health_status += "• GitHub Backup: ✅ Connected\n"
+            else:
+                health_status += "• GitHub Backup: ⚠️ No backups found\n"
+        except:
+            health_status += "• GitHub Backup: ❌ Connection failed\n"
+        
+        # Check bot status
+        try:
+            me = await context.bot.get_me()
+            health_status += f"• Bot API: ✅ Connected (@{me.username})\n"
+        except:
+            health_status += "• Bot API: ❌ Connection failed\n"
+        
+        health_status += f"\n🕒 Uptime: {self.get_uptime()}"
+        health_status += f"\n📊 Memory: {self.get_memory_usage()}"
+        
+        await update.message.reply_text(health_status, parse_mode='Markdown')
+    
+    def get_uptime(self):
+        """Get bot uptime"""
+        if hasattr(self, 'start_time'):
+            uptime = datetime.now() - self.start_time
+            days = uptime.days
+            hours, remainder = divmod(uptime.seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            return f"{days}d {hours}h {minutes}m {seconds}s"
+        return "Unknown"
+    
+    def get_memory_usage(self):
+        """Get memory usage"""
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            return f"{memory_mb:.1f} MB"
+        except:
+            return "N/A"
+    
+    async def list_target_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """List all target channels"""
+        if not self.db.is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ Admin access required.")
+            return
+        
+        target_channels = self.db.get_target_channels()
+        
+        if not target_channels:
+            await update.message.reply_text("📭 No target channels configured.")
+            return
+        
+        text = "🎯 **Target Channels**\n\n"
+        for channel in target_channels:
+            channel_id, username, title, added_at, auto_added = channel[1], channel[2], channel[3], channel[4], channel[5]
+            text += f"• {title or 'Unknown'} (@{username or 'N/A'})\n"
+            text += f"  ID: {channel_id} | Auto: {'✅' if auto_added else '❌'}\n\n"
+        
+        await update.message.reply_text(text, parse_mode='Markdown')
+    
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
@@ -623,10 +880,33 @@ Use /promote to start promoting your channel!
             if all_joined:
                 await query.edit_message_text(
                     "✅ Verification successful! You have joined @worldwidepromotion1!\n\n"
-                    "You can now use all bot features. Use /promote to start promoting your channel!"
+                    "You can now use all bot features. Use the buttons below to get started:",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🚀 Promote Channel", callback_data="main_promote")],
+                        [InlineKeyboardButton("📊 View Statistics", callback_data="main_stats")],
+                        [InlineKeyboardButton("💰 Pricing", callback_data="main_pricing")],
+                    ])
                 )
             else:
                 await self.show_join_required_message(update, not_joined)
+        
+        elif query.data == 'main_menu':
+            await self.show_main_menu(update, context)
+        
+        elif query.data == 'main_promote':
+            await self.show_promotion_menu(update, context)
+        
+        elif query.data == 'main_stats':
+            await self.stats(update, context, from_callback=True)
+        
+        elif query.data == 'main_pricing':
+            await self.show_pricing(update, context)
+        
+        elif query.data == 'main_admin':
+            if self.db.is_admin(query.from_user.id):
+                await self.admin(update, context, from_callback=True)
+            else:
+                await query.answer("❌ Admin access required.", show_alert=True)
         
         elif query.data.startswith('promo_'):
             # Check join requirement for promotion
@@ -639,8 +919,13 @@ Use /promote to start promoting your channel!
             pricing = self.pricing[duration]
             
             await query.edit_message_text(
-                f"✅ Selected: {duration.replace('months', ' Months').title()} - {pricing['stars']} Stars\n\n"
-                f"Please forward a message from your channel or send your channel username (@username)."
+                f"✅ **Selected: {duration.replace('months', ' Months').title()}**\n"
+                f"💫 **Cost: {pricing['stars']} Stars**\n\n"
+                f"Please forward a message from your channel or send your channel username (@username).",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Back to Promotion", callback_data="main_promote")]
+                ])
             )
         
         elif query.data == 'admin_stats':
@@ -649,6 +934,48 @@ Use /promote to start promoting your channel!
             await self.create_backup(update, context)
         elif query.data == 'admin_restore':
             await self.restore_backup(update, context)
+        elif query.data == 'admin_targets':
+            await self.list_target_channels(update, context)
+    
+    async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        keyboard = [
+            [InlineKeyboardButton("🚀 Promote Channel", callback_data="main_promote")],
+            [InlineKeyboardButton("📊 View Statistics", callback_data="main_stats")],
+            [InlineKeyboardButton("💰 Pricing", callback_data="main_pricing")],
+        ]
+        
+        if self.db.is_admin(update.callback_query.from_user.id):
+            keyboard.append([InlineKeyboardButton("🛠️ Admin Panel", callback_data="main_admin")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.callback_query.edit_message_text(
+            "🏠 **Main Menu**\n\nChoose an option below:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    
+    async def show_pricing(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        text = "💰 **Pricing Plans**\n\n"
+        for duration, info in self.pricing.items():
+            text += f"• {duration.replace('months', ' Months').title()}: {info['stars']} Stars\n"
+        
+        text += "\nUse the promotion menu to select a plan!"
+        
+        keyboard = [[InlineKeyboardButton("🚀 Start Promotion", callback_data="main_promote")]]
+        
+        if update.callback_query:
+            await update.callback_query.edit_message_text(
+                text, 
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
     
     async def handle_forwarded_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Check if user has joined required channels
@@ -697,12 +1024,17 @@ Use /promote to start promoting your channel!
             
             if success:
                 await update.message.reply_text(
-                    f"✅ Channel @{forwarded_from.username} promoted for {duration} (FREE - Admin privilege)!\n\n"
-                    f"Promotion will expire in {pricing['days']} days."
+                    f"✅ **Channel Promoted!**\n\n"
+                    f"📢 Channel: @{forwarded_from.username}\n"
+                    f"⏰ Duration: {duration.replace('months', ' Months').title()}\n"
+                    f"💰 Cost: FREE (Admin privilege)\n"
+                    f"📅 Expires: {pricing['days']} days\n\n"
+                    f"Your channel will be promoted across our network!",
+                    parse_mode='Markdown'
                 )
                 
                 # Backup to GitHub if configured
-                if self.github_backup:
+                if self.github_backup.token:
                     data = self.db.export_data()
                     self.github_backup.backup_database(data)
             else:
@@ -723,11 +1055,11 @@ Use /promote to start promoting your channel!
         )
         
         payment_text = f"""
-💫 Payment Required
+💫 **Payment Required**
 
-Channel: @{forwarded_from.username}
-Duration: {duration.replace('months', ' Months').title()}
-Cost: {stars_required} Stars
+📢 Channel: @{forwarded_from.username}
+⏰ Duration: {duration.replace('months', ' Months').title()}
+💫 Cost: {stars_required} Stars
 
 To complete payment:
 1. Go to @{bot_username}
@@ -737,7 +1069,16 @@ To complete payment:
 Your promotion will be activated automatically after payment verification.
         """
         
-        await update.message.reply_text(payment_text)
+        keyboard = [
+            [InlineKeyboardButton("📋 Back to Menu", callback_data="main_menu")]
+        ]
+        
+        await update.message.reply_text(
+            payment_text, 
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        
         user_data['pending_payment'] = {
             'payment_id': payment_id,
             'channel_id': forwarded_from.id,
@@ -746,6 +1087,45 @@ Your promotion will be activated automatically after payment verification.
             'duration': duration,
             'stars_required': stars_required
         }
+    
+    async def handle_bot_added_to_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle when bot is added to a channel as admin"""
+        try:
+            for member in update.message.new_chat_members:
+                if member.id == context.bot.id:
+                    chat = update.message.chat
+                    
+                    # Check if bot is admin in the channel
+                    try:
+                        chat_member = await context.bot.get_chat_member(chat.id, context.bot.id)
+                        if chat_member.status in ['administrator', 'creator']:
+                            # Add to target channels (bot stays in channel permanently)
+                            self.db.add_target_channel(
+                                chat.id,
+                                chat.username,
+                                chat.title
+                            )
+                            
+                            logging.info(f"✅ Auto-added channel to targets: {chat.title} (ID: {chat.id})")
+                            
+                            # Send confirmation (optional)
+                            try:
+                                await context.bot.send_message(
+                                    chat_id=chat.id,
+                                    text="🤖 **Promotion Bot Activated!**\n\n"
+                                         "I've been automatically added to the target channels list. "
+                                         "I will promote channels here regularly. "
+                                         "Promotion messages will be automatically deleted after 5 hours.",
+                                    parse_mode='Markdown'
+                                )
+                            except:
+                                pass  # Silent fail if can't send message
+                    except Exception as e:
+                        logging.error(f"Error checking admin status: {e}")
+                    
+                    break
+        except Exception as e:
+            logging.error(f"Error handling bot addition: {e}")
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle regular messages including payment receipts"""
@@ -780,13 +1160,20 @@ Your promotion will be activated automatically after payment verification.
                 
                 if success:
                     await update.message.reply_text(
-                        f"✅ Payment received! Channel @{payment_data['username']} "
-                        f"promoted for {payment_data['duration']}!\n\n"
-                        f"Promotion will expire in {self.pricing[payment_data['duration']]['days']} days."
+                        f"✅ **Payment Received!**\n\n"
+                        f"📢 Channel: @{payment_data['username']}\n"
+                        f"⏰ Duration: {payment_data['duration'].replace('months', ' Months').title()}\n"
+                        f"💫 Stars: {payment_data['stars_required']}\n"
+                        f"📅 Expires: {self.pricing[payment_data['duration']]['days']} days\n\n"
+                        f"Your channel is now being promoted across our network!",
+                        parse_mode='Markdown',
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("📋 Back to Menu", callback_data="main_menu")]
+                        ])
                     )
                     
                     # Backup to GitHub
-                    if self.github_backup:
+                    if self.github_backup.token:
                         data = self.db.export_data()
                         self.github_backup.backup_database(data)
                 else:
@@ -799,38 +1186,48 @@ Your promotion will be activated automatically after payment verification.
                     f"Received: {stars_sent} Stars."
                 )
     
-    async def admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE, from_callback=False):
         if not self.db.is_admin(update.effective_user.id):
-            await update.message.reply_text("❌ Admin access required.")
-            return
+            if from_callback:
+                await update.callback_query.answer("❌ Admin access required.", show_alert=True)
+                return
+            else:
+                await update.message.reply_text("❌ Admin access required.")
+                return
         
         keyboard = [
             [InlineKeyboardButton("📊 Stats", callback_data="admin_stats")],
             [InlineKeyboardButton("🔄 Backup", callback_data="admin_backup")],
             [InlineKeyboardButton("📥 Restore", callback_data="admin_restore")],
+            [InlineKeyboardButton("🎯 Target Channels", callback_data="admin_targets")],
+            [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
         ]
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update.message.reply_text(
-            "🛠️ Admin Panel",
-            reply_markup=reply_markup
-        )
+        text = "🛠️ **Admin Panel**\n\nSelect an option below:"
+        
+        if from_callback:
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+        else:
+            await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
     
     async def show_admin_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         active_channels = self.db.get_active_channels()
         expired_channels = self.db.get_expired_channels()
+        target_channels = self.db.get_target_channels()
         
         stats_text = f"""
 📊 **Bot Statistics**
 
-✅ Active Channels: {len(active_channels)}
+✅ Active Promotions: {len(active_channels)}
 ❌ Expired Channels: {len(expired_channels)}
-        
+🎯 Target Channels: {len(target_channels)}
+
 **Active Promotions:**
 """
         
-        for channel in active_channels:
+        for channel in active_channels[:5]:  # Show first 5 channels
             username = channel[2] or "Private"
             title = channel[3]
             promo_end = datetime.strptime(channel[6], '%Y-%m-%d %H:%M:%S')
@@ -838,10 +1235,19 @@ Your promotion will be activated automatically after payment verification.
             
             stats_text += f"• {title} (@{username}) - {days_left} days left\n"
         
-        await update.callback_query.message.reply_text(stats_text)
+        if len(active_channels) > 5:
+            stats_text += f"\n... and {len(active_channels) - 5} more channels"
+        
+        keyboard = [[InlineKeyboardButton("🔙 Back to Admin", callback_data="main_admin")]]
+        
+        await update.callback_query.message.reply_text(
+            stats_text, 
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
     
     async def create_backup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.github_backup:
+        if not self.github_backup.token:
             await update.callback_query.message.reply_text("❌ GitHub backup not configured.")
             return
         
@@ -856,7 +1262,7 @@ Your promotion will be activated automatically after payment verification.
             await update.callback_query.message.reply_text("❌ Backup failed!")
     
     async def restore_backup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self.github_backup:
+        if not self.github_backup.token:
             await update.callback_query.message.reply_text("❌ GitHub backup not configured.")
             return
         
@@ -878,7 +1284,7 @@ Your promotion will be activated automatically after payment verification.
             await update.message.reply_text("❌ Admin access required.")
             return
         
-        if not self.github_backup:
+        if not self.github_backup.token:
             await update.message.reply_text("❌ GitHub backup not configured.")
             return
         
@@ -892,7 +1298,7 @@ Your promotion will be activated automatically after payment verification.
         else:
             await update.message.reply_text("❌ Backup failed!")
     
-    async def stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE, from_callback=False):
         """Show public statistics"""
         # Check join requirement
         if not await self.check_join_requirement(update, context):
@@ -908,17 +1314,33 @@ Your promotion will be activated automatically after payment verification.
 **Currently Promoting:**
 """
         
-        for channel in active_channels[:10]:  # Show first 10 channels
+        for channel in active_channels[:5]:  # Show first 5 channels
             username = channel[2] or "Private"
             title = channel[3]
             stats_text += f"• {title} (@{username})\n"
         
-        if len(active_channels) > 10:
-            stats_text += f"\n... and {len(active_channels) - 10} more channels!"
+        if len(active_channels) > 5:
+            stats_text += f"\n... and {len(active_channels) - 5} more channels!"
         
-        stats_text += "\nUse /promote to add your channel!"
+        stats_text += "\nUse the promotion menu to add your channel!"
         
-        await update.message.reply_text(stats_text)
+        keyboard = [
+            [InlineKeyboardButton("🚀 Promote Channel", callback_data="main_promote")],
+            [InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")],
+        ]
+        
+        if from_callback:
+            await update.callback_query.edit_message_text(
+                stats_text, 
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                stats_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
     
     async def monitor_promotions(self, context: ContextTypes.DEFAULT_TYPE):
         """Check for expired promotions"""
@@ -932,13 +1354,13 @@ Your promotion will be activated automatically after payment verification.
             logging.info(f"Channel expired: {channel_name} (ID: {channel_id})")
     
     async def promote_channels(self, context: ContextTypes.DEFAULT_TYPE):
-        """Promote channels across network"""
+        """Promote channels across network - works even if bot is not admin"""
         active_channels = self.db.get_active_channels()
         
         if not active_channels:
             return
         
-        promotion_message = "📢 **Promoted Channels:**\n\n"
+        promotion_message = "📢 **Promoted Channels**\n\n"
         
         for channel in active_channels:
             username = channel[2]
@@ -949,25 +1371,104 @@ Your promotion will be activated automatically after payment verification.
             else:
                 promotion_message += f"• {title}\n"
         
-        promotion_message += "\nUse /promote to add your channel!"
+        promotion_message += "\n💫 Promote your channel with @worldwidepromotion1_bot"
         
-        # Send to all target channels
-        target_channels = os.getenv('TARGET_CHANNELS', '').split(',')
+        # Send to all target channels (even if bot is not admin)
+        target_channels = self.db.get_target_channels()
         
-        for channel_id in target_channels:
-            if channel_id.strip():
-                try:
-                    await context.bot.send_message(
-                        chat_id=channel_id.strip(),
-                        text=promotion_message,
-                        parse_mode='Markdown',
-                        disable_web_page_preview=True
-                    )
-                except Exception as e:
-                    logging.error(f"Error promoting in channel {channel_id}: {e}")
+        successful_posts = 0
+        
+        for channel in target_channels:
+            channel_id = channel[1]
+            channel_title = channel[3] or "Unknown"
+            
+            try:
+                # Try to send message even if bot is not admin
+                sent_message = await context.bot.send_message(
+                    chat_id=channel_id,
+                    text=promotion_message,
+                    parse_mode='Markdown',
+                    disable_web_page_preview=True
+                )
+                
+                # Store message info for deletion after 5 hours
+                self.db.add_promotion_message(channel_id, sent_message.message_id)
+                
+                successful_posts += 1
+                logging.info(f"✅ Promoted channels in: {channel_title} (ID: {channel_id})")
+                
+            except Exception as e:
+                error_msg = str(e).lower()
+                if any(x in error_msg for x in ['bot was blocked', 'chat not found', 'not enough rights', 'forbidden']):
+                    # Remove inaccessible channels
+                    self.db.remove_target_channel(channel_id)
+                    logging.info(f"❌ Removed inaccessible target channel: {channel_title} (ID: {channel_id}) - {e}")
+                else:
+                    logging.warning(f"⚠️ Could not post in {channel_title} (ID: {channel_id}): {e}")
+        
+        logging.info(f"📊 Promotion round completed: {successful_posts}/{len(target_channels)} channels")
+    
+    async def delete_old_promotion_messages(self, context: ContextTypes.DEFAULT_TYPE):
+        """Delete promotion messages after 5 hours"""
+        messages_to_delete = self.db.get_promotion_messages_to_delete()
+        
+        deleted_count = 0
+        error_count = 0
+        
+        for message in messages_to_delete:
+            channel_id = message[1]
+            message_id = message[2]
+            
+            try:
+                await context.bot.delete_message(
+                    chat_id=channel_id,
+                    message_id=message_id
+                )
+                self.db.mark_message_deleted(message_id)
+                deleted_count += 1
+                logging.info(f"✅ Deleted old promotion message from channel: {channel_id}")
+            except Exception as e:
+                error_count += 1
+                logging.warning(f"⚠️ Could not delete message {message_id} from {channel_id}: {e}")
+                # Mark as deleted anyway to avoid retrying
+                self.db.mark_message_deleted(message_id)
+        
+        if deleted_count > 0 or error_count > 0:
+            logging.info(f"🗑️ Message cleanup: {deleted_count} deleted, {error_count} errors")
+        
+        # Clean up old database records
+        self.db.cleanup_old_messages()
+    
+    async def health_monitor(self, context: ContextTypes.DEFAULT_TYPE):
+        """Health monitoring task"""
+        try:
+            # Test database
+            self.db.get_active_channels()
+            
+            # Test GitHub connection
+            if self.github_backup.token:
+                self.github_backup.load_latest_backup()
+            
+            # Test bot API
+            await context.bot.get_me()
+            
+            logging.info("✅ Health check passed")
+        except Exception as e:
+            logging.error(f"❌ Health check failed: {e}")
+    
+    async def keep_alive(self, context: ContextTypes.DEFAULT_TYPE):
+        """Keep alive system - sends periodic requests to prevent sleeping"""
+        try:
+            # Simple operation to keep the bot active
+            active_channels = len(self.db.get_active_channels())
+            logging.info(f"🤖 Keep alive - {active_channels} active promotions")
+        except Exception as e:
+            logging.error(f"Keep alive error: {e}")
     
     async def run(self):
-        # Start monitoring task
+        self.start_time = datetime.now()
+        
+        # Start monitoring tasks
         self.application.job_queue.run_repeating(
             self.monitor_promotions, 
             interval=3600,  # Check every hour
@@ -977,18 +1478,40 @@ Your promotion will be activated automatically after payment verification.
         # Start promotion task
         self.application.job_queue.run_repeating(
             self.promote_channels,
-            interval=86400,  # Promote once daily
+            interval=43200,  # Promote every 12 hours
             first=30
         )
         
+        # Delete old promotion messages (5 hours)
+        self.application.job_queue.run_repeating(
+            self.delete_old_promotion_messages,
+            interval=1800,  # Check every 30 minutes
+            first=60
+        )
+        
+        # Health monitoring
+        self.application.job_queue.run_repeating(
+            self.health_monitor,
+            interval=300,  # Every 5 minutes
+            first=10
+        )
+        
+        # Keep alive system
+        self.application.job_queue.run_repeating(
+            self.keep_alive,
+            interval=300,  # Every 5 minutes
+            first=15
+        )
+        
         # Auto-backup every 6 hours
-        if self.github_backup:
+        if self.github_backup.token:
             self.application.job_queue.run_repeating(
                 self.auto_backup,
                 interval=21600,  # 6 hours
                 first=60
             )
         
+        logging.info("🤖 Starting Promotion Bot with all features...")
         await self.application.run_polling()
     
     async def auto_backup(self, context: ContextTypes.DEFAULT_TYPE):
@@ -1005,14 +1528,15 @@ Your promotion will be activated automatically after payment verification.
 
 def main():
     # Check required environment variables
-    if not os.getenv('TELEGRAM_BOT_TOKEN'):
-        logging.error("❌ TELEGRAM_BOT_TOKEN environment variable is required!")
+    if not os.getenv('BOT_TOKEN'):
+        logging.error("❌ BOT_TOKEN environment variable is required!")
         return
     
-    bot = PromotionBot()
+    # Check if we're on Render and set webhook for health checks
+    if os.getenv('RENDER'):
+        logging.info("🚀 Running on Render platform")
     
-    logging.info("🤖 Starting Promotion Bot...")
-    logging.info("🔒 Channel join requirement: @worldwidepromotion1")
+    bot = PromotionBot()
     asyncio.run(bot.run())
 
 if __name__ == '__main__':
