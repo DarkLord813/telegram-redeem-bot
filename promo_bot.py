@@ -11,7 +11,6 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.error import TelegramError
 import requests
 from aiohttp import web
-import threading
 
 # Configure logging
 logging.basicConfig(
@@ -24,9 +23,11 @@ logger = logging.getLogger(__name__)
 # Simple HTTP server for Render port binding
 class HealthServer:
     def __init__(self):
+        # Automatically get PORT from Render environment variable
         self.port = int(os.getenv('PORT', 10000))
         self.app = web.Application()
         self.setup_routes()
+        logger.info(f"🔧 Health server configured for port: {self.port}")
         
     def setup_routes(self):
         self.app.router.add_get('/', self.health_check)
@@ -38,7 +39,8 @@ class HealthServer:
         return web.json_response({
             "status": "healthy",
             "service": "Telegram Promotion Bot",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "port": self.port
         })
     
     async def status_check(self, request):
@@ -47,29 +49,22 @@ class HealthServer:
             "status": "running",
             "service": "Telegram Promotion Bot",
             "timestamp": datetime.now().isoformat(),
-            "environment": "production"
+            "environment": "production",
+            "port": self.port
         })
     
-    def run(self):
-        """Run the HTTP server in a separate thread"""
-        async def start_server():
-            runner = web.AppRunner(self.app)
-            await runner.setup()
-            site = web.TCPSite(runner, '0.0.0.0', self.port)
-            await site.start()
-            logger.info(f"✅ HTTP server running on port {self.port}")
-            
-            # Keep the server running
-            while True:
-                await asyncio.sleep(3600)
-        
-        # Run in current event loop
-        asyncio.create_task(start_server())
+    async def start(self):
+        """Start the HTTP server"""
+        runner = web.AppRunner(self.app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', self.port)
+        await site.start()
+        logger.info(f"✅ HTTP server running on port {self.port}")
+        return runner
 
-# Start HTTP server
+# Global health server instance
 health_server = HealthServer()
 
-# ... (Keep all your existing Database class exactly as before)
 class Database:
     def __init__(self):
         self.db_path = "promotion_bot.db"
@@ -195,7 +190,6 @@ class Database:
             logger.error(f"❌ Database initialization failed: {e}")
             raise
     
-    # ... (Keep all other Database methods exactly as before)
     def add_channel(self, channel_id, channel_username, channel_title, owner_id, duration_days):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -537,7 +531,6 @@ class Database:
         finally:
             conn.close()
 
-# ... (Keep GitHubBackup class exactly as before)
 class GitHubBackup:
     def __init__(self):
         try:
@@ -664,7 +657,6 @@ class GitHubBackup:
             logger.error(f"Load backup error: {e}")
             return None
 
-# ... (Keep PromotionBot class exactly as before, but add the HTTP server startup)
 class PromotionBot:
     def __init__(self):
         try:
@@ -1640,21 +1632,28 @@ Your promotion will be activated automatically after payment verification.
         logger.info("🤖 Starting Promotion Bot with all features...")
         
         # Start HTTP server for Render port binding
-        health_server.run()
+        http_runner = await health_server.start()
         
-        # Use the simple modern approach
+        logger.info("✅ HTTP server started successfully")
+        
+        # Use the simple modern approach for Telegram bot
         await self.application.run_polling()
+        
+        # Cleanup (this won't be reached until bot stops)
+        await http_runner.cleanup()
 
-def main():
-    """Main function that properly handles the event loop"""
+async def main():
+    """Main async function to run the bot"""
     try:
+        # Debug: Show port detection
+        detected_port = os.getenv('PORT', '10000 (default)')
+        logger.info(f"🔧 Starting bot - Detected PORT: {detected_port}")
+        
         logger.info("🚀 Starting Promotion Bot with HTTP server...")
         
         # Create and run the bot
         bot = PromotionBot()
-        
-        # This is the key fix for Render - use asyncio.run() properly
-        asyncio.run(bot.run())
+        await bot.run()
         
     except KeyboardInterrupt:
         logger.info("🛑 Bot stopped by user")
@@ -1663,4 +1662,12 @@ def main():
         logger.error(traceback.format_exc())
 
 if __name__ == '__main__':
-    main()
+    # Simple and clean startup for Render
+    try:
+        logger.info("🔧 Bot startup initiated...")
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped by user")
+    except Exception as e:
+        logger.error(f"💥 Critical startup error: {e}")
+        logger.error(traceback.format_exc())
