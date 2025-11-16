@@ -8,6 +8,7 @@ import traceback
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.error import TelegramError
 import requests
 
 # Configure logging
@@ -1531,48 +1532,54 @@ Your promotion will be activated automatically after payment verification.
     async def run(self):
         self.start_time = datetime.now()
         
-        # Start monitoring tasks
-        self.application.job_queue.run_repeating(
-            self.monitor_promotions, 
-            interval=3600,  # Check every hour
-            first=10
-        )
-        
-        # Start promotion task
-        self.application.job_queue.run_repeating(
-            self.promote_channels,
-            interval=43200,  # Promote every 12 hours
-            first=30
-        )
-        
-        # Delete old promotion messages (5 hours)
-        self.application.job_queue.run_repeating(
-            self.delete_old_promotion_messages,
-            interval=1800,  # Check every 30 minutes
-            first=60
-        )
-        
-        # Health monitoring
-        self.application.job_queue.run_repeating(
-            self.health_monitor,
-            interval=300,  # Every 5 minutes
-            first=10
-        )
-        
-        # Keep alive system
-        self.application.job_queue.run_repeating(
-            self.keep_alive,
-            interval=300,  # Every 5 minutes
-            first=15
-        )
-        
-        # Auto-backup every 6 hours
-        if self.github_backup.token:
+        # Check if JobQueue is available before setting up jobs
+        if hasattr(self.application, 'job_queue') and self.application.job_queue:
+            # Start monitoring tasks
             self.application.job_queue.run_repeating(
-                self.auto_backup,
-                interval=21600,  # 6 hours
+                self.monitor_promotions, 
+                interval=3600,  # Check every hour
+                first=10
+            )
+            
+            # Start promotion task
+            self.application.job_queue.run_repeating(
+                self.promote_channels,
+                interval=43200,  # Promote every 12 hours
+                first=30
+            )
+            
+            # Delete old promotion messages (5 hours)
+            self.application.job_queue.run_repeating(
+                self.delete_old_promotion_messages,
+                interval=1800,  # Check every 30 minutes
                 first=60
             )
+            
+            # Health monitoring
+            self.application.job_queue.run_repeating(
+                self.health_monitor,
+                interval=300,  # Every 5 minutes
+                first=10
+            )
+            
+            # Keep alive system
+            self.application.job_queue.run_repeating(
+                self.keep_alive,
+                interval=300,  # Every 5 minutes
+                first=15
+            )
+            
+            # Auto-backup every 6 hours
+            if self.github_backup.token:
+                self.application.job_queue.run_repeating(
+                    self.auto_backup,
+                    interval=21600,  # 6 hours
+                    first=60
+                )
+            
+            logging.info("✅ All scheduled tasks initialized")
+        else:
+            logging.warning("⚠️ JobQueue not available - scheduled tasks disabled")
         
         logging.info("🤖 Starting Promotion Bot with all features...")
         
@@ -1594,6 +1601,14 @@ def main():
             return
         
         logging.info("✅ BOT_TOKEN found")
+        
+        # Test JobQueue availability
+        try:
+            from telegram.ext import JobQueue
+            logging.info("✅ JobQueue available")
+        except ImportError:
+            logging.warning("⚠️ JobQueue not available. Install with: pip install 'python-telegram-bot[job-queue]'")
+            logging.warning("⚠️ Scheduled tasks will be disabled")
         
         # Check if we're on Render
         if os.getenv('RENDER'):
