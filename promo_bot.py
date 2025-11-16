@@ -17,14 +17,16 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+logger = logging.getLogger(__name__)
+
 class Database:
     def __init__(self):
         self.db_path = "promotion_bot.db"
         try:
             self.init_db()
-            logging.info("✅ Database initialized successfully")
+            logger.info("✅ Database initialized successfully")
         except Exception as e:
-            logging.error(f"❌ Database initialization failed: {e}")
+            logger.error(f"❌ Database initialization failed: {e}")
             raise
     
     def init_db(self):
@@ -116,9 +118,9 @@ class Database:
                                 INSERT OR IGNORE INTO admins (user_id, username) 
                                 VALUES (?, ?)
                             ''', (int(admin_id.strip()), 'default_admin'))
-                            logging.info(f"✅ Added admin: {admin_id}")
+                            logger.info(f"✅ Added admin: {admin_id}")
                         except Exception as e:
-                            logging.error(f"❌ Error adding admin {admin_id}: {e}")
+                            logger.error(f"❌ Error adding admin {admin_id}: {e}")
             
             # Insert initial target channels from environment
             target_channels = os.getenv('TARGET_CHANNELS', '')
@@ -130,16 +132,16 @@ class Database:
                                 INSERT OR IGNORE INTO target_channels (channel_id, auto_added) 
                                 VALUES (?, ?)
                             ''', (channel_id.strip(), False))
-                            logging.info(f"✅ Added target channel: {channel_id}")
+                            logger.info(f"✅ Added target channel: {channel_id}")
                         except Exception as e:
-                            logging.error(f"❌ Error adding target channel {channel_id}: {e}")
+                            logger.error(f"❌ Error adding target channel {channel_id}: {e}")
             
             conn.commit()
             conn.close()
-            logging.info("✅ Database tables created successfully")
+            logger.info("✅ Database tables created successfully")
             
         except Exception as e:
-            logging.error(f"❌ Database initialization failed: {e}")
+            logger.error(f"❌ Database initialization failed: {e}")
             raise
     
     def add_channel(self, channel_id, channel_username, channel_title, owner_id, duration_days):
@@ -158,7 +160,7 @@ class Database:
             conn.commit()
             return True
         except Exception as e:
-            logging.error(f"Error adding channel: {e}")
+            logger.error(f"Error adding channel: {e}")
             return False
         finally:
             conn.close()
@@ -239,7 +241,7 @@ class Database:
             conn.commit()
             return cursor.lastrowid
         except Exception as e:
-            logging.error(f"Error adding payment: {e}")
+            logger.error(f"Error adding payment: {e}")
             return None
         finally:
             conn.close()
@@ -267,7 +269,7 @@ class Database:
             ''', (user_id, channel_id, joined, datetime.now()))
             conn.commit()
         except Exception as e:
-            logging.error(f"Error updating join status: {e}")
+            logger.error(f"Error updating join status: {e}")
         finally:
             conn.close()
     
@@ -298,7 +300,7 @@ class Database:
             conn.commit()
             return True
         except Exception as e:
-            logging.error(f"Error adding target channel: {e}")
+            logger.error(f"Error adding target channel: {e}")
             return False
         finally:
             conn.close()
@@ -335,7 +337,7 @@ class Database:
             conn.commit()
             return True
         except Exception as e:
-            logging.error(f"Error adding promotion message: {e}")
+            logger.error(f"Error adding promotion message: {e}")
             return False
         finally:
             conn.close()
@@ -478,7 +480,7 @@ class Database:
             conn.commit()
             return True
         except Exception as e:
-            logging.error(f"Error importing data: {e}")
+            logger.error(f"Error importing data: {e}")
             return False
         finally:
             conn.close()
@@ -495,17 +497,17 @@ class GitHubBackup:
             # Log GitHub configuration status
             if self.token and self.repo_owner and self.repo_name:
                 self.base_url = f"https://api.github.com/repos/{self.repo_owner}/{self.repo_name}/contents"
-                logging.info("✅ GitHub backup configured")
+                logger.info("✅ GitHub backup configured")
             else:
                 self.base_url = None
-                logging.warning("⚠️ GitHub backup not fully configured")
+                logger.warning("⚠️ GitHub backup not fully configured")
         except Exception as e:
-            logging.error(f"❌ GitHubBackup initialization failed: {e}")
+            logger.error(f"❌ GitHubBackup initialization failed: {e}")
             self.base_url = None
     
     def backup_database(self, database_export):
         if not self.token or not self.base_url:
-            logging.warning("GitHub token not available, skipping backup")
+            logger.warning("GitHub token not available, skipping backup")
             return False
             
         try:
@@ -540,14 +542,14 @@ class GitHubBackup:
             )
             
             if response.status_code == 201:
-                logging.info("✅ Backup created successfully on GitHub")
+                logger.info("✅ Backup created successfully on GitHub")
                 return True
             else:
-                logging.error(f"❌ Backup failed with status {response.status_code}: {response.text}")
+                logger.error(f"❌ Backup failed with status {response.status_code}: {response.text}")
                 return False
             
         except Exception as e:
-            logging.error(f"Backup error: {e}")
+            logger.error(f"Backup error: {e}")
             return False
     
     def _ensure_backup_directory(self, headers):
@@ -572,7 +574,7 @@ class GitHubBackup:
                     json=data
                 )
         except Exception as e:
-            logging.error(f"Directory creation error: {e}")
+            logger.error(f"Directory creation error: {e}")
     
     def load_latest_backup(self):
         if not self.token or not self.base_url:
@@ -606,22 +608,22 @@ class GitHubBackup:
             return None
             
         except Exception as e:
-            logging.error(f"Load backup error: {e}")
+            logger.error(f"Load backup error: {e}")
             return None
 
 class PromotionBot:
     def __init__(self):
         try:
-            logging.info("🔄 Initializing PromotionBot...")
+            logger.info("🔄 Initializing PromotionBot...")
             
             self.token = os.getenv('BOT_TOKEN')
             if not self.token:
                 raise ValueError("BOT_TOKEN environment variable is required")
             
-            logging.info("✅ BOT_TOKEN loaded successfully")
+            logger.info("✅ BOT_TOKEN loaded successfully")
             
             self.required_channels = self.get_required_channels()
-            logging.info(f"✅ Required channels: {len(self.required_channels)}")
+            logger.info(f"✅ Required channels: {len(self.required_channels)}")
             
             # Initialize database first
             self.db = Database()
@@ -645,11 +647,11 @@ class PromotionBot:
             self.application = Application.builder().token(self.token).build()
             self.setup_handlers()
             
-            logging.info("✅ PromotionBot initialized successfully")
+            logger.info("✅ PromotionBot initialized successfully")
             
         except Exception as e:
-            logging.error(f"❌ Failed to initialize PromotionBot: {e}")
-            logging.error(traceback.format_exc())
+            logger.error(f"❌ Failed to initialize PromotionBot: {e}")
+            logger.error(traceback.format_exc())
             raise
     
     def get_required_channels(self):
@@ -682,13 +684,13 @@ class PromotionBot:
             if backup_data:
                 success = self.db.import_data(backup_data)
                 if success:
-                    logging.info("✅ Successfully loaded backup from GitHub")
+                    logger.info("✅ Successfully loaded backup from GitHub")
                 else:
-                    logging.error("❌ Failed to import backup data")
+                    logger.error("❌ Failed to import backup data")
             else:
-                logging.info("ℹ️ No existing backup found, starting fresh")
+                logger.info("ℹ️ No existing backup found, starting fresh")
         except Exception as e:
-            logging.error(f"Backup load error: {e}")
+            logger.error(f"Backup load error: {e}")
     
     async def check_user_joined_channels(self, user_id):
         """Check if user has joined all required channels"""
@@ -711,7 +713,7 @@ class PromotionBot:
                     not_joined.append(channel['username'])
                     
             except Exception as e:
-                logging.error(f"Error checking channel membership for {channel['username']}: {e}")
+                logger.error(f"Error checking channel membership for {channel['username']}: {e}")
                 not_joined.append(channel['username'])
         
         return len(not_joined) == 0, not_joined
@@ -1158,7 +1160,7 @@ Your promotion will be activated automatically after payment verification.
                                 chat.title
                             )
                             
-                            logging.info(f"✅ Auto-added channel to targets: {chat.title} (ID: {chat.id})")
+                            logger.info(f"✅ Auto-added channel to targets: {chat.title} (ID: {chat.id})")
                             
                             # Send confirmation (optional)
                             try:
@@ -1173,11 +1175,11 @@ Your promotion will be activated automatically after payment verification.
                             except:
                                 pass  # Silent fail if can't send message
                     except Exception as e:
-                        logging.error(f"Error checking admin status: {e}")
+                        logger.error(f"Error checking admin status: {e}")
                     
                     break
         except Exception as e:
-            logging.error(f"Error handling bot addition: {e}")
+            logger.error(f"Error handling bot addition: {e}")
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle regular messages including payment receipts"""
@@ -1403,7 +1405,7 @@ Your promotion will be activated automatically after payment verification.
             channel_name = channel[3]
             self.db.expire_channel(channel_id)
             
-            logging.info(f"Channel expired: {channel_name} (ID: {channel_id})")
+            logger.info(f"Channel expired: {channel_name} (ID: {channel_id})")
     
     async def promote_channels(self, context: ContextTypes.DEFAULT_TYPE):
         """Promote channels across network - works even if bot is not admin"""
@@ -1447,18 +1449,18 @@ Your promotion will be activated automatically after payment verification.
                 self.db.add_promotion_message(channel_id, sent_message.message_id)
                 
                 successful_posts += 1
-                logging.info(f"✅ Promoted channels in: {channel_title} (ID: {channel_id})")
+                logger.info(f"✅ Promoted channels in: {channel_title} (ID: {channel_id})")
                 
             except Exception as e:
                 error_msg = str(e).lower()
                 if any(x in error_msg for x in ['bot was blocked', 'chat not found', 'not enough rights', 'forbidden']):
                     # Remove inaccessible channels
                     self.db.remove_target_channel(channel_id)
-                    logging.info(f"❌ Removed inaccessible target channel: {channel_title} (ID: {channel_id}) - {e}")
+                    logger.info(f"❌ Removed inaccessible target channel: {channel_title} (ID: {channel_id}) - {e}")
                 else:
-                    logging.warning(f"⚠️ Could not post in {channel_title} (ID: {channel_id}): {e}")
+                    logger.warning(f"⚠️ Could not post in {channel_title} (ID: {channel_id}): {e}")
         
-        logging.info(f"📊 Promotion round completed: {successful_posts}/{len(target_channels)} channels")
+        logger.info(f"📊 Promotion round completed: {successful_posts}/{len(target_channels)} channels")
     
     async def delete_old_promotion_messages(self, context: ContextTypes.DEFAULT_TYPE):
         """Delete promotion messages after 5 hours"""
@@ -1478,15 +1480,15 @@ Your promotion will be activated automatically after payment verification.
                 )
                 self.db.mark_message_deleted(message_id)
                 deleted_count += 1
-                logging.info(f"✅ Deleted old promotion message from channel: {channel_id}")
+                logger.info(f"✅ Deleted old promotion message from channel: {channel_id}")
             except Exception as e:
                 error_count += 1
-                logging.warning(f"⚠️ Could not delete message {message_id} from {channel_id}: {e}")
+                logger.warning(f"⚠️ Could not delete message {message_id} from {channel_id}: {e}")
                 # Mark as deleted anyway to avoid retrying
                 self.db.mark_message_deleted(message_id)
         
         if deleted_count > 0 or error_count > 0:
-            logging.info(f"🗑️ Message cleanup: {deleted_count} deleted, {error_count} errors")
+            logger.info(f"🗑️ Message cleanup: {deleted_count} deleted, {error_count} errors")
         
         # Clean up old database records
         self.db.cleanup_old_messages()
@@ -1504,18 +1506,18 @@ Your promotion will be activated automatically after payment verification.
             # Test bot API
             await context.bot.get_me()
             
-            logging.info("✅ Health check passed")
+            logger.info("✅ Health check passed")
         except Exception as e:
-            logging.error(f"❌ Health check failed: {e}")
+            logger.error(f"❌ Health check failed: {e}")
     
     async def keep_alive(self, context: ContextTypes.DEFAULT_TYPE):
         """Keep alive system - sends periodic requests to prevent sleeping"""
         try:
             # Simple operation to keep the bot active
             active_channels = len(self.db.get_active_channels())
-            logging.info(f"🤖 Keep alive - {active_channels} active promotions")
+            logger.info(f"🤖 Keep alive - {active_channels} active promotions")
         except Exception as e:
-            logging.error(f"Keep alive error: {e}")
+            logger.error(f"Keep alive error: {e}")
     
     async def auto_backup(self, context: ContextTypes.DEFAULT_TYPE):
         """Automatically backup database"""
@@ -1523,11 +1525,11 @@ Your promotion will be activated automatically after payment verification.
             data = self.db.export_data()
             success = self.github_backup.backup_database(data)
             if success:
-                logging.info("✅ Auto-backup completed successfully")
+                logger.info("✅ Auto-backup completed successfully")
             else:
-                logging.error("❌ Auto-backup failed")
+                logger.error("❌ Auto-backup failed")
         except Exception as e:
-            logging.error(f"Auto-backup error: {e}")
+            logger.error(f"Auto-backup error: {e}")
     
     async def run(self):
         self.start_time = datetime.now()
@@ -1577,57 +1579,45 @@ Your promotion will be activated automatically after payment verification.
                     first=60
                 )
             
-            logging.info("✅ All scheduled tasks initialized")
+            logger.info("✅ All scheduled tasks initialized")
         else:
-            logging.warning("⚠️ JobQueue not available - scheduled tasks disabled")
+            logger.warning("⚠️ JobQueue not available - scheduled tasks disabled")
         
-        logging.info("🤖 Starting Promotion Bot with all features...")
+        logger.info("🤖 Starting Promotion Bot with all features...")
         
-        # Use the simple modern approach
-        await self.application.run_polling()
+        # Use the simple modern approach - THIS IS THE KEY FIX
+        await self.application.initialize()
+        await self.application.start()
+        await self.application.updater.start_polling()
+        
+        logger.info("✅ Bot is now running and polling for messages...")
+        
+        # Keep the bot running
+        while True:
+            await asyncio.sleep(3600)  # Sleep for 1 hour
+    
+    async def stop(self):
+        """Properly stop the bot"""
+        await self.application.updater.stop()
+        await self.application.stop()
+        await self.application.shutdown()
 
 def main():
+    """Main function that properly handles the event loop"""
     try:
-        # Check required environment variables with debug info
-        logging.info("🔧 Starting bot initialization...")
+        logger.info("🚀 Starting Promotion Bot...")
         
-        bot_token = os.getenv('BOT_TOKEN')
-        if not bot_token:
-            logging.error("❌ BOT_TOKEN environment variable is required!")
-            logging.info("Available environment variables:")
-            for key in os.environ:
-                if 'TOKEN' in key or 'BOT' in key or 'GITHUB' in key:
-                    logging.info(f"  {key}: {'*' * len(os.getenv(key)) if os.getenv(key) else 'NOT SET'}")
-            return
-        
-        logging.info("✅ BOT_TOKEN found")
-        
-        # Test JobQueue availability
-        try:
-            from telegram.ext import JobQueue
-            logging.info("✅ JobQueue available")
-        except ImportError:
-            logging.warning("⚠️ JobQueue not available. Install with: pip install 'python-telegram-bot[job-queue]'")
-            logging.warning("⚠️ Scheduled tasks will be disabled")
-        
-        # Check if we're on Render
-        if os.getenv('RENDER'):
-            logging.info("🚀 Running on Render platform")
-        
-        # Initialize bot
-        logging.info("🔄 Creating PromotionBot instance...")
+        # Create and run the bot
         bot = PromotionBot()
-        logging.info("✅ PromotionBot created successfully")
         
-        # Run bot - use the proper asyncio approach for Render
-        logging.info("🤖 Starting bot...")
-        
-        # Use asyncio.run() which handles event loop creation properly
+        # This is the key fix for Render - use asyncio.run() properly
         asyncio.run(bot.run())
         
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped by user")
     except Exception as e:
-        logging.error(f"💥 Critical error during startup: {e}")
-        logging.error(traceback.format_exc())
+        logger.error(f"💥 Critical error: {e}")
+        logger.error(traceback.format_exc())
 
 if __name__ == '__main__':
     main()
