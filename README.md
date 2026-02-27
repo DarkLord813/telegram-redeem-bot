@@ -1,4 +1,4 @@
-# Gold Ultimate Telegram Bot 🤖
+# Telegram Redeem Bot 🤖
 
 A feature-rich Telegram earning bot with stars system, referrals, and Telegram Stars payments.
 
