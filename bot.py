@@ -25,6 +25,10 @@ app = Flask(__name__)
 # ================= ADMINS =================
 ADMIN_IDS = [7475473197, 7713987088]  # Replace with your real admin IDs
 
+# ================= REQUIRED CHANNEL =================
+REQUIRED_CHANNEL = "@PulseProfit012"
+CHANNEL_LINK = "https://t.me/PulseProfit012"
+
 # ================= COOLDOWN SETTINGS =================
 COOLDOWN_TIME = 60  # seconds between earning attempts
 WITHDRAWAL_COOLDOWN = 3600  # 1 hour between withdrawal requests
@@ -53,6 +57,17 @@ cursor = conn.cursor()
 
 # Create tables
 cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    first_name TEXT,
+    joined_channel INTEGER DEFAULT 0,
+    verified INTEGER DEFAULT 0,
+    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+cursor.execute("""
 CREATE TABLE IF NOT EXISTS users_wallet (
     user_id INTEGER PRIMARY KEY,
     stars INTEGER DEFAULT 0,
@@ -60,14 +75,17 @@ CREATE TABLE IF NOT EXISTS users_wallet (
     referrals INTEGER DEFAULT 0,
     premium INTEGER DEFAULT 0,
     tasks_done INTEGER DEFAULT 0,
-    daily_withdrawn INTEGER DEFAULT 0
+    daily_withdrawn INTEGER DEFAULT 0,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
 )
 """)
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS referrals (
     referrer_id INTEGER,
-    referred_id INTEGER UNIQUE
+    referred_id INTEGER UNIQUE,
+    FOREIGN KEY (referrer_id) REFERENCES users(user_id),
+    FOREIGN KEY (referred_id) REFERENCES users(user_id)
 )
 """)
 
@@ -80,7 +98,8 @@ CREATE TABLE IF NOT EXISTS withdraw_requests (
     status TEXT DEFAULT 'pending',
     request_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     processed_time TIMESTAMP DEFAULT NULL,
-    transaction_id TEXT
+    transaction_id TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
 )
 """)
 
@@ -88,7 +107,8 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS user_actions (
     user_id INTEGER,
     action_type TEXT,
-    action_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    action_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
 )
 """)
 
@@ -99,7 +119,8 @@ CREATE TABLE IF NOT EXISTS payments (
     telegram_payment_charge_id TEXT,
     stars_purchased INTEGER,
     amount_paid INTEGER,
-    payment_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    payment_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
 )
 """)
 
@@ -128,6 +149,7 @@ CREATE TABLE IF NOT EXISTS user_tasks (
     verified INTEGER DEFAULT 0,
     verified_by INTEGER,
     verified_at TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(user_id),
     FOREIGN KEY (task_id) REFERENCES tasks(id)
 )
 """)
@@ -153,7 +175,8 @@ CREATE TABLE IF NOT EXISTS redeemed_codes (
     code_id INTEGER,
     user_id INTEGER,
     redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (code_id) REFERENCES redeem_codes(id)
+    FOREIGN KEY (code_id) REFERENCES redeem_codes(id),
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
 )
 """)
 
@@ -413,6 +436,33 @@ def deactivate_redeem_code(code_id):
     conn.commit()
     return cursor.rowcount > 0
 
+# ================= CHANNEL VERIFICATION FUNCTIONS =================
+
+def check_channel_membership(user_id):
+    """Check if user has joined the required channel"""
+    try:
+        member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except Exception as e:
+        print(f"❌ Channel check error: {e}")
+        return False
+
+def mark_user_joined(user_id, username, first_name):
+    """Mark user as having joined the channel"""
+    cursor.execute("""
+        INSERT OR REPLACE INTO users (user_id, username, first_name, joined_channel, verified)
+        VALUES (?, ?, ?, 1, 1)
+    """, (user_id, username, first_name))
+    conn.commit()
+
+def is_user_verified(user_id):
+    """Check if user has joined the channel"""
+    cursor.execute("SELECT joined_channel FROM users WHERE user_id=?", (user_id,))
+    result = cursor.fetchone()
+    if result:
+        return result[0] == 1
+    return False
+
 # ================= HELPER FUNCTIONS =================
 
 def get_wallet(user_id):
@@ -493,10 +543,91 @@ def is_admin(user_id):
     """Check if user is admin"""
     return user_id in ADMIN_IDS
 
-# ================= AUTO WITHDRAWAL PROCESSOR =================
+# ================= CHANNEL VERIFICATION DECORATOR =================
+
+def requires_channel(func):
+    """Decorator to check if user has joined the channel before accessing features"""
+    def wrapper(message_or_call):
+        user_id = None
+        chat_id = None
+        message_id = None
+        
+        if hasattr(message_or_call, 'from_user'):
+            # It's a message
+            user_id = message_or_call.from_user.id
+            chat_id = message_or_call.chat.id
+        elif hasattr(message_or_call, 'message'):
+            # It's a callback query
+            user_id = message_or_call.from_user.id
+            chat_id = message_or_call.message.chat.id
+            message_id = message_or_call.message.message_id
+        
+        # Check if user has joined the channel
+        if not is_user_verified(user_id):
+            # Check actual membership
+            if check_channel_membership(user_id):
+                # Mark as joined in database
+                username = message_or_call.from_user.username if hasattr(message_or_call.from_user, 'username') else ""
+                first_name = message_or_call.from_user.first_name
+                mark_user_joined(user_id, username, first_name)
+                # User is now verified, proceed
+                return func(message_or_call)
+            else:
+                # Show channel join message
+                channel_text = f"""
+━━━━━━━━━━━━━━━━━━━━━
+🔒 **CHANNEL REQUIRED** 🔒
+━━━━━━━━━━━━━━━━━━━━━
+
+👋 Hello **{get_user_display_name(user_id)}**!
+
+To access Pulse Profit bot, you must join our channel first.
+
+━━━━━━━━━━━━━━━━━━━━━
+📢 **Channel:** {REQUIRED_CHANNEL}
+🔗 **Link:** {CHANNEL_LINK}
+━━━━━━━━━━━━━━━━━━━━━
+
+✅ **Steps to access:**
+1. Click the button below to join
+2. Return to the bot
+3. Click "I've Joined ✓"
+
+━━━━━━━━━━━━━━━━━━━━━
+"""
+                markup = InlineKeyboardMarkup()
+                markup.row(
+                    InlineKeyboardButton("📢 JOIN CHANNEL 📢", url=CHANNEL_LINK),
+                    InlineKeyboardButton("✅ I'VE JOINED ✅", callback_data="verify_channel")
+                )
+                
+                if hasattr(message_or_call, 'message'):
+                    # It's a callback query - edit message
+                    bot.edit_message_text(
+                        channel_text,
+                        chat_id,
+                        message_id,
+                        reply_markup=markup,
+                        parse_mode="Markdown"
+                    )
+                else:
+                    # It's a message - send new message
+                    bot.send_message(
+                        chat_id,
+                        channel_text,
+                        reply_markup=markup,
+                        parse_mode="Markdown"
+                    )
+                return None
+        else:
+            # User is verified, proceed
+            return func(message_or_call)
+    return wrapper
+
+# ================= AUTO WITHDRAWAL PROCESSOR (TELEGRAM STARS) =================
 
 def process_withdrawals():
-    """Automatically process pending withdrawals"""
+    """Automatically process pending withdrawals and send Telegram Stars"""
     while True:
         time.sleep(300)  # Check every 5 minutes
         
@@ -520,11 +651,12 @@ def process_withdrawals():
                 """, (amount, user_id))
                 
                 if withdrawal_type == "stars":
-                    # Process Telegram Stars withdrawal
+                    # Send Telegram Stars directly to user
                     try:
-                        # Create invoice to send stars to user
+                        # Create invoice to send stars to user's Telegram Stars balance
                         prices = [LabeledPrice(label=f"Withdrawal of {amount} Stars", amount=amount)]
                         
+                        # Send the stars directly to user's Telegram wallet
                         bot.send_invoice(
                             user_id,
                             title=f"⚡ Pulse Profit Withdrawal",
@@ -560,7 +692,7 @@ def process_withdrawals():
                                 f"✅ **Stars Withdrawal Sent!**\n\n"
                                 f"Amount: {amount} ⭐️ Telegram Stars\n"
                                 f"Transaction ID: `{transaction_id}`\n\n"
-                                f"Check your Telegram Stars balance!",
+                                f"Check your Telegram Stars balance - they've been added directly to your account!",
                                 parse_mode="Markdown"
                             )
                         except:
@@ -622,6 +754,80 @@ def process_withdrawals():
 # Start withdrawal processor thread
 threading.Thread(target=process_withdrawals, daemon=True).start()
 
+# ================= CHANNEL VERIFICATION HANDLER =================
+
+@bot.callback_query_handler(func=lambda c: c.data == "verify_channel")
+def verify_channel(call):
+    user_id = call.from_user.id
+    
+    if check_channel_membership(user_id):
+        # Mark as joined in database
+        username = call.from_user.username if call.from_user.username else ""
+        first_name = call.from_user.first_name
+        mark_user_joined(user_id, username, first_name)
+        
+        # Get wallet
+        get_wallet(user_id)
+        
+        bot.answer_callback_query(call.id, "✅ Verification successful! Access granted.", show_alert=True)
+        
+        # Show main menu
+        welcome_text = f"""
+━━━━━━━━━━━━━━━━━━━━━
+✅ **VERIFICATION SUCCESSFUL!** ✅
+━━━━━━━━━━━━━━━━━━━━━
+
+👋 Welcome to **Pulse Profit**!
+
+━━━━━━━━━━━━━━━━━━━━━
+💰 **Your Balance:** {get_wallet(user_id)[1]} 🟡⭐
+━━━━━━━━━━━━━━━━━━━━━
+
+👇 **Choose an option below:** 👇
+"""
+        
+        # Check if user is admin to show admin panel option
+        markup = main_menu()
+        if is_admin(user_id):
+            admin_markup = InlineKeyboardMarkup()
+            admin_markup.row(
+                InlineKeyboardButton("💼✨ EARN STARS 💼✨", callback_data="earn"),
+                InlineKeyboardButton("📋✅ TASKS 📋✅", callback_data="show_tasks")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("📨🔥 REFER & EARN 📨🔥", callback_data="refer"),
+                InlineKeyboardButton("👤🌈 PROFILE 👤🌈", callback_data="profile")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("🏆🎖 LEADERBOARD 🏆🎖", callback_data="leaderboard"),
+                InlineKeyboardButton("💎🚀 PREMIUM 💎🚀", callback_data="premium")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("🟡💰 BUY STARS 🟡💰", callback_data="buy_menu"),
+                InlineKeyboardButton("💳🏦 WITHDRAW 💳🏦", callback_data="withdraw_menu")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("🎫 REDEEM CODE 🎫", callback_data="redeem_menu")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+            )
+            markup = admin_markup
+        
+        bot.edit_message_text(
+            welcome_text,
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+    else:
+        bot.answer_callback_query(
+            call.id, 
+            "❌ You haven't joined the channel yet! Please join first.", 
+            show_alert=True
+        )
+
 # ================= MAIN MENU =================
 
 def main_menu():
@@ -651,6 +857,7 @@ def main_menu():
 # ================= REDEEM CODE MENU =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "redeem_menu")
+@requires_channel
 def redeem_menu(call):
     user_id = call.from_user.id
     user_name = get_user_display_name(user_id)
@@ -703,123 +910,210 @@ Have a promo code? Enter it below to receive free stars!
 @bot.message_handler(commands=['start'])
 def start_handler(message):
     user_id = message.from_user.id
-    get_wallet(user_id)
+    username = message.from_user.username if message.from_user.username else ""
+    first_name = message.from_user.first_name
+    
+    # Check if user already in database
+    cursor.execute("SELECT joined_channel FROM users WHERE user_id=?", (user_id,))
+    user = cursor.fetchone()
+    
+    if user and user[0] == 1:
+        # User already verified - show main menu
+        get_wallet(user_id)
+        
+        # Check for referral
+        args = message.text.split()
+        if len(args) > 1:
+            try:
+                referrer_id = int(args[1])
+                if referrer_id != user_id:
+                    cursor.execute("SELECT * FROM referrals WHERE referred_id=?", (user_id,))
+                    already = cursor.fetchone()
 
-    args = message.text.split()
-
-    if len(args) > 1:
-        try:
-            referrer_id = int(args[1])
-            if referrer_id != user_id:
-                cursor.execute("SELECT * FROM referrals WHERE referred_id=?", (user_id,))
-                already = cursor.fetchone()
-
-                if not already:
-                    cooldown = check_cooldown(referrer_id, "refer", COOLDOWN_TIME)
-                    if cooldown == 0:
-                        cursor.execute("INSERT INTO referrals VALUES (?,?)", (referrer_id, user_id))
-                        cursor.execute("UPDATE users_wallet SET referrals = referrals + 1 WHERE user_id=?", (referrer_id,))
-                        add_stars(referrer_id, 5, trigger_backup=False)
-                        log_action(referrer_id, "refer")
-                        conn.commit()
-                        
-                        # Notify referrer
-                        referrer_name = get_user_display_name(referrer_id)
-                        user_name = get_user_display_name(user_id)
-                        try:
-                            bot.send_message(
-                                referrer_id,
-                                f"🎉 **New Referral!**\n\n"
-                                f"👤 {user_name} joined using your link!\n"
-                                f"💰 You earned **5** 🟡⭐!\n\n"
-                                f"📊 Total Referrals: {get_wallet(referrer_id)[3]}",
-                                parse_mode="Markdown"
-                            )
-                        except:
-                            pass
-                        
-                        # Backup on new referral
-                        if GITHUB_TOKEN and GITHUB_REPO:
-                            threading.Thread(target=backup_to_github, args=("referral", f"New user {user_id} referred by {referrer_id}"), daemon=True).start()
-                    else:
-                        try:
-                            bot.send_message(
-                                referrer_id,
-                                f"⏳ Please wait **{cooldown}** seconds before next referral!",
-                                parse_mode="Markdown"
-                            )
-                        except:
-                            pass
-        except:
-            pass
-
-    # Welcome message
-    user_name = get_user_display_name(user_id)
-    welcome_text = f"""
+                    if not already:
+                        cooldown = check_cooldown(referrer_id, "refer", COOLDOWN_TIME)
+                        if cooldown == 0:
+                            cursor.execute("INSERT INTO referrals VALUES (?,?)", (referrer_id, user_id))
+                            cursor.execute("UPDATE users_wallet SET referrals = referrals + 1 WHERE user_id=?", (referrer_id,))
+                            add_stars(referrer_id, 5, trigger_backup=False)
+                            log_action(referrer_id, "refer")
+                            conn.commit()
+                            
+                            # Notify referrer
+                            referrer_name = get_user_display_name(referrer_id)
+                            user_name = get_user_display_name(user_id)
+                            try:
+                                bot.send_message(
+                                    referrer_id,
+                                    f"🎉 **New Referral!**\n\n"
+                                    f"👤 {user_name} joined using your link!\n"
+                                    f"💰 You earned **5** 🟡⭐!\n\n"
+                                    f"📊 Total Referrals: {get_wallet(referrer_id)[3]}",
+                                    parse_mode="Markdown"
+                                )
+                            except:
+                                pass
+                            
+                            # Backup on new referral
+                            if GITHUB_TOKEN and GITHUB_REPO:
+                                threading.Thread(target=backup_to_github, args=("referral", f"New user {user_id} referred by {referrer_id}"), daemon=True).start()
+                        else:
+                            try:
+                                bot.send_message(
+                                    referrer_id,
+                                    f"⏳ Please wait **{cooldown}** seconds before next referral!",
+                                    parse_mode="Markdown"
+                                )
+                            except:
+                                pass
+            except:
+                pass
+        
+        welcome_text = f"""
 ━━━━━━━━━━━━━━━━━━━━━
-⚡ **WELCOME TO PULSE PROFIT** ⚡
+⚡ **WELCOME BACK TO PULSE PROFIT** ⚡
 ━━━━━━━━━━━━━━━━━━━━━
 
-👋 Hello **{user_name}**!
-
-━━━━━━━━━━━━━━━━━━━━━
-✨ **WHAT YOU CAN DO:** ✨
-━━━━━━━━━━━━━━━━━━━━━
-
-💰 **EARN STARS** - Complete tasks and earn
-📋 **TASKS** - Join channels, visit links
-👥 **REFER FRIENDS** - Earn 5⭐ per referral
-💎 **PREMIUM** - Unlock premium features
-🟡 **BUY STARS** - Purchase with Telegram Stars
-💳 **WITHDRAW** - Convert to Admin or Telegram Stars
-🎫 **REDEEM CODE** - Use promo codes for free stars
+👋 Hello **{get_user_display_name(user_id)}**!
 
 ━━━━━━━━━━━━━━━━━━━━━
-💡 **Your Balance:** {get_wallet(user_id)[1]} 🟡⭐
+💰 **Your Balance:** {get_wallet(user_id)[1]} 🟡⭐
 ━━━━━━━━━━━━━━━━━━━━━
 
 👇 **Choose an option below:** 👇
 """
-    
-    # Check if user is admin to show admin panel option
-    markup = main_menu()
-    if is_admin(user_id):
-        # Add admin panel button to menu
-        admin_markup = InlineKeyboardMarkup()
-        admin_markup.row(
-            InlineKeyboardButton("💼✨ EARN STARS 💼✨", callback_data="earn"),
-            InlineKeyboardButton("📋✅ TASKS 📋✅", callback_data="show_tasks")
+        
+        # Check if user is admin to show admin panel option
+        markup = main_menu()
+        if is_admin(user_id):
+            admin_markup = InlineKeyboardMarkup()
+            admin_markup.row(
+                InlineKeyboardButton("💼✨ EARN STARS 💼✨", callback_data="earn"),
+                InlineKeyboardButton("📋✅ TASKS 📋✅", callback_data="show_tasks")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("📨🔥 REFER & EARN 📨🔥", callback_data="refer"),
+                InlineKeyboardButton("👤🌈 PROFILE 👤🌈", callback_data="profile")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("🏆🎖 LEADERBOARD 🏆🎖", callback_data="leaderboard"),
+                InlineKeyboardButton("💎🚀 PREMIUM 💎🚀", callback_data="premium")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("🟡💰 BUY STARS 🟡💰", callback_data="buy_menu"),
+                InlineKeyboardButton("💳🏦 WITHDRAW 💳🏦", callback_data="withdraw_menu")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("🎫 REDEEM CODE 🎫", callback_data="redeem_menu")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+            )
+            markup = admin_markup
+        
+        bot.send_message(
+            user_id,
+            welcome_text,
+            reply_markup=markup,
+            parse_mode="Markdown"
         )
-        admin_markup.row(
-            InlineKeyboardButton("📨🔥 REFER & EARN 📨🔥", callback_data="refer"),
-            InlineKeyboardButton("👤🌈 PROFILE 👤🌈", callback_data="profile")
-        )
-        admin_markup.row(
-            InlineKeyboardButton("🏆🎖 LEADERBOARD 🏆🎖", callback_data="leaderboard"),
-            InlineKeyboardButton("💎🚀 PREMIUM 💎🚀", callback_data="premium")
-        )
-        admin_markup.row(
-            InlineKeyboardButton("🟡💰 BUY STARS 🟡💰", callback_data="buy_menu"),
-            InlineKeyboardButton("💳🏦 WITHDRAW 💳🏦", callback_data="withdraw_menu")
-        )
-        admin_markup.row(
-            InlineKeyboardButton("🎫 REDEEM CODE 🎫", callback_data="redeem_menu")
-        )
-        admin_markup.row(
-            InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
-        )
-        markup = admin_markup
-    
-    bot.send_message(
-        user_id,
-        welcome_text,
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
+    else:
+        # New user - check channel membership
+        if check_channel_membership(user_id):
+            # User already in channel - verify them
+            mark_user_joined(user_id, username, first_name)
+            get_wallet(user_id)
+            
+            welcome_text = f"""
+━━━━━━━━━━━━━━━━━━━━━
+⚡ **WELCOME TO PULSE PROFIT** ⚡
+━━━━━━━━━━━━━━━━━━━━━
+
+👋 Hello **{first_name}**!
+
+✅ You're already a member of our channel!
+
+━━━━━━━━━━━━━━━━━━━━━
+💰 **Your Balance:** {get_wallet(user_id)[1]} 🟡⭐
+━━━━━━━━━━━━━━━━━━━━━
+
+👇 **Choose an option below:** 👇
+"""
+            
+            # Check if user is admin to show admin panel option
+            markup = main_menu()
+            if is_admin(user_id):
+                admin_markup = InlineKeyboardMarkup()
+                admin_markup.row(
+                    InlineKeyboardButton("💼✨ EARN STARS 💼✨", callback_data="earn"),
+                    InlineKeyboardButton("📋✅ TASKS 📋✅", callback_data="show_tasks")
+                )
+                admin_markup.row(
+                    InlineKeyboardButton("📨🔥 REFER & EARN 📨🔥", callback_data="refer"),
+                    InlineKeyboardButton("👤🌈 PROFILE 👤🌈", callback_data="profile")
+                )
+                admin_markup.row(
+                    InlineKeyboardButton("🏆🎖 LEADERBOARD 🏆🎖", callback_data="leaderboard"),
+                    InlineKeyboardButton("💎🚀 PREMIUM 💎🚀", callback_data="premium")
+                )
+                admin_markup.row(
+                    InlineKeyboardButton("🟡💰 BUY STARS 🟡💰", callback_data="buy_menu"),
+                    InlineKeyboardButton("💳🏦 WITHDRAW 💳🏦", callback_data="withdraw_menu")
+                )
+                admin_markup.row(
+                    InlineKeyboardButton("🎫 REDEEM CODE 🎫", callback_data="redeem_menu")
+                )
+                admin_markup.row(
+                    InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+                )
+                markup = admin_markup
+            
+            bot.send_message(
+                user_id,
+                welcome_text,
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+        else:
+            # User needs to join channel
+            channel_text = f"""
+━━━━━━━━━━━━━━━━━━━━━
+🔒 **CHANNEL REQUIRED** 🔒
+━━━━━━━━━━━━━━━━━━━━━
+
+👋 Hello **{first_name}**!
+
+To access Pulse Profit bot, you must join our channel first.
+
+━━━━━━━━━━━━━━━━━━━━━
+📢 **Channel:** {REQUIRED_CHANNEL}
+🔗 **Link:** {CHANNEL_LINK}
+━━━━━━━━━━━━━━━━━━━━━
+
+✅ **Steps to access:**
+1. Click the button below to join
+2. Return to the bot
+3. Click "I've Joined ✓"
+
+━━━━━━━━━━━━━━━━━━━━━
+"""
+            markup = InlineKeyboardMarkup()
+            markup.row(
+                InlineKeyboardButton("📢 JOIN CHANNEL 📢", url=CHANNEL_LINK),
+                InlineKeyboardButton("✅ I'VE JOINED ✅", callback_data="verify_channel")
+            )
+            
+            bot.send_message(
+                user_id,
+                channel_text,
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
 
 # ================= EARN STARS =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "earn")
+@requires_channel
 def earn(call):
     user_id = call.from_user.id
     user_name = get_user_display_name(user_id)
@@ -915,6 +1209,7 @@ def earn(call):
 # ================= PROFILE =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "profile")
+@requires_channel
 def profile(call):
     user_id = call.from_user.id
     user = get_wallet(user_id)
@@ -1020,6 +1315,7 @@ def profile(call):
 # ================= LEADERBOARD WITH NAMES (ADMINS REMOVED) =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "leaderboard")
+@requires_channel
 def leaderboard(call):
     user_id = call.from_user.id
     # Get top 10 users by stars (excluding admins)
@@ -1588,7 +1884,7 @@ def admin_withdrawals(call):
     cursor.execute("""
         SELECT wr.id, wr.user_id, wr.amount, wr.withdrawal_type, wr.request_time, u.first_name
         FROM withdraw_requests wr
-        LEFT JOIN users_wallet u ON wr.user_id = u.user_id
+        LEFT JOIN users u ON wr.user_id = u.user_id
         WHERE wr.status = 'pending'
         ORDER BY wr.request_time ASC
     """)
@@ -1646,7 +1942,7 @@ def admin_verifications(call):
         SELECT ut.id, ut.user_id, ut.task_id, t.task_name, t.reward, ut.completed_at, u.first_name
         FROM user_tasks ut
         JOIN tasks t ON ut.task_id = t.id
-        LEFT JOIN users_wallet u ON ut.user_id = u.user_id
+        LEFT JOIN users u ON ut.user_id = u.user_id
         WHERE ut.verified = 0
         ORDER BY ut.completed_at ASC
     """)
@@ -1879,7 +2175,7 @@ def admin_backup_now(call):
     
     threading.Thread(target=do_backup, daemon=True).start()
 
-# ================= HANDLE ALL TEXT MESSAGES =================
+# ================= HANDLE ALL TEXT MESSAGES (FIXED TASK CREATION FLOW) =================
 
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
@@ -2731,6 +3027,7 @@ def admin_confirm_delete(call):
 # ================= TASKS SYSTEM =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "show_tasks")
+@requires_channel
 def show_tasks(call):
     user_id = call.from_user.id
     cursor.execute("SELECT * FROM tasks WHERE active=1 ORDER BY created_at DESC")
@@ -2819,6 +3116,7 @@ def show_tasks(call):
     )
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("task_details_"))
+@requires_channel
 def task_details(call):
     user_id = call.from_user.id
     task_id = int(call.data.replace("task_details_", ""))
@@ -2930,6 +3228,7 @@ def task_details(call):
     )
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("claim_task_"))
+@requires_channel
 def claim_task(call):
     user_id = call.from_user.id
     task_id = int(call.data.replace("claim_task_", ""))
@@ -3234,6 +3533,7 @@ def approve_withdraw(message):
 # ================= WITHDRAWAL MENU =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "withdraw_menu")
+@requires_channel
 def withdraw_menu(call):
     user_id = call.from_user.id
     user = get_wallet(user_id)
@@ -3313,6 +3613,7 @@ def withdraw_menu(call):
 # ================= STARS WITHDRAWAL MENU =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "withdraw_stars_menu")
+@requires_channel
 def withdraw_stars_menu(call):
     user_id = call.from_user.id
     user = get_wallet(user_id)
@@ -3402,6 +3703,7 @@ def withdraw_stars_menu(call):
     )
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("withdraw_stars_"))
+@requires_channel
 def withdraw_stars_amount(call):
     user_id = call.from_user.id
     
@@ -3515,6 +3817,7 @@ You'll receive the stars directly in your Telegram wallet!
 # ================= ADMIN WITHDRAWAL =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "withdraw_admin")
+@requires_channel
 def withdraw_admin(call):
     user_id = call.from_user.id
     user = get_wallet(user_id)
@@ -3610,6 +3913,7 @@ def withdraw_admin(call):
 # ================= REFERRAL LINK =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "refer")
+@requires_channel
 def refer(call):
     user_id = call.from_user.id
     bot_name = bot.get_me().username
@@ -3666,6 +3970,7 @@ def refer(call):
 # ================= PREMIUM =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "premium")
+@requires_channel
 def premium(call):
     user_id = call.from_user.id
     user = get_wallet(user_id)
@@ -3743,6 +4048,7 @@ def premium(call):
 # ================= BUY STARS =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "buy_menu")
+@requires_channel
 def buy_menu(call):
     user_id = call.from_user.id
     text = f"""
@@ -3790,6 +4096,7 @@ def buy_menu(call):
     )
 
 @bot.callback_query_handler(func=lambda c: c.data == "buy_show")
+@requires_channel
 def buy_show(call):
     user_id = call.from_user.id
     markup = InlineKeyboardMarkup()
@@ -3817,6 +4124,7 @@ def buy_show(call):
     )
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
+@requires_channel
 def process_buy(call):
     user_id = call.from_user.id
     if call.data == "buy_menu":
@@ -4029,6 +4337,7 @@ if __name__ == "__main__":
     print("🎫 Redeem Code System: Active")
     print("👑 Admin Panel: Active")
     print("🏆 Leaderboard: Admins hidden from view")
+    print("🔒 Force Join: Required (@PulseProfit012)")
     print("🛡️ Anti-Spam Cooldown: Active")
     print("💾 GitHub Backup: " + ("Active" if GITHUB_TOKEN and GITHUB_REPO else "Disabled"))
     print("=" * 50)
