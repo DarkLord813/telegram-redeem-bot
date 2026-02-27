@@ -6,7 +6,7 @@ import threading
 import time
 import base64
 from datetime import datetime, timedelta
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 
@@ -17,6 +17,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = os.getenv("GITHUB_REPO")  # username/repo
 GITHUB_FILE_PATH = "promo.db"
 
+# Initialize bot and app
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
@@ -42,6 +43,7 @@ STAR_PACKAGES = {
 conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
 
+# Create tables
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users_wallet (
     user_id INTEGER PRIMARY KEY,
@@ -50,9 +52,7 @@ CREATE TABLE IF NOT EXISTS users_wallet (
     referrals INTEGER DEFAULT 0,
     premium INTEGER DEFAULT 0,
     tasks_done INTEGER DEFAULT 0,
-    last_earn_time TIMESTAMP DEFAULT NULL,
-    daily_withdrawn INTEGER DEFAULT 0,
-    last_withdraw_time TIMESTAMP DEFAULT NULL
+    daily_withdrawn INTEGER DEFAULT 0
 )
 """)
 
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS withdraw_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
     amount INTEGER,
-    status TEXT DEFAULT 'pending',  -- pending, approved, rejected
+    status TEXT DEFAULT 'pending',
     request_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     processed_time TIMESTAMP DEFAULT NULL
 )
@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS withdraw_requests (
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS user_actions (
     user_id INTEGER,
-    action_type TEXT,  -- 'earn', 'withdraw', 'refer'
+    action_type TEXT,
     action_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
@@ -88,16 +88,68 @@ CREATE TABLE IF NOT EXISTS payments (
     user_id INTEGER,
     telegram_payment_charge_id TEXT,
     stars_purchased INTEGER,
-    amount_paid INTEGER,  -- in XTR
+    amount_paid INTEGER,
     payment_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
 
 conn.commit()
 
-# ================= HELPERS =================
+# ================= KEEP-ALIVE SERVICE =================
+
+class KeepAliveService:
+    def __init__(self, health_url=None):
+        self.health_url = health_url
+        self.is_running = False
+        self.ping_count = 0
+        
+    def start(self):
+        """Start keep-alive service"""
+        self.is_running = True
+        
+        def ping_loop():
+            while self.is_running:
+                try:
+                    self.ping_count += 1
+                    if self.health_url:
+                        response = requests.get(self.health_url, timeout=15)
+                        if response.status_code == 200:
+                            print(f"✅ Keep-alive ping #{self.ping_count}: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    time.sleep(240)  # Ping every 4 minutes
+                except Exception as e:
+                    print(f"❌ Keep-alive error: {e}")
+                    time.sleep(60)
+        
+        thread = threading.Thread(target=ping_loop, daemon=True)
+        thread.start()
+        print("🔄 Keep-alive service started")
+        
+    def stop(self):
+        self.is_running = False
+        print("🛑 Keep-alive service stopped")
+
+# ================= FLASK HEALTH ENDPOINTS =================
+
+@app.route('/')
+def home():
+    return jsonify({
+        'status': 'running',
+        'service': 'Gold Ultimate Bot',
+        'timestamp': time.time()
+    })
+
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': time.time(),
+        'pings': keep_alive.ping_count if 'keep_alive' in globals() else 0
+    }), 200
+
+# ================= HELPER FUNCTIONS =================
 
 def get_wallet(user_id):
+    """Get or create user wallet"""
     cursor.execute("SELECT * FROM users_wallet WHERE user_id=?", (user_id,))
     user = cursor.fetchone()
     if not user:
@@ -107,6 +159,7 @@ def get_wallet(user_id):
     return user
 
 def add_stars(user_id, amount):
+    """Add stars to user wallet"""
     cursor.execute("""
         UPDATE users_wallet
         SET stars = stars + ?, total_earned = total_earned + ?
@@ -127,8 +180,8 @@ def check_cooldown(user_id, action, cooldown_seconds):
         last_time = datetime.strptime(last_action[0], '%Y-%m-%d %H:%M:%S')
         time_diff = (datetime.now() - last_time).total_seconds()
         if time_diff < cooldown_seconds:
-            return int(cooldown_seconds - time_diff)  # Return remaining cooldown
-    return 0  # No cooldown
+            return int(cooldown_seconds - time_diff)
+    return 0
 
 def log_action(user_id, action_type):
     """Log user action for cooldown tracking"""
@@ -144,7 +197,7 @@ def reset_daily_withdrawals():
     conn.commit()
     print("✅ Daily withdrawal limits reset")
 
-# ================= AUTO WITHDRAWAL APPROVAL =================
+# ================= AUTO WITHDRAWAL PROCESSOR =================
 
 def process_withdrawals():
     """Automatically process pending withdrawals"""
@@ -161,16 +214,13 @@ def process_withdrawals():
         for req_id, user_id, amount in pending:
             user = get_wallet(user_id)
             
-            # Check if user still has enough stars
             if user[1] >= amount:
-                # Deduct stars
                 cursor.execute("""
                     UPDATE users_wallet 
                     SET stars = stars - ? 
                     WHERE user_id = ?
                 """, (amount, user_id))
                 
-                # Update request status
                 cursor.execute("""
                     UPDATE withdraw_requests 
                     SET status = 'approved', processed_time = ? 
@@ -179,7 +229,6 @@ def process_withdrawals():
                 
                 conn.commit()
                 
-                # Notify user
                 try:
                     bot.send_message(
                         user_id, 
@@ -188,7 +237,6 @@ def process_withdrawals():
                 except:
                     pass
             else:
-                # Reject if insufficient stars
                 cursor.execute("""
                     UPDATE withdraw_requests 
                     SET status = 'rejected', processed_time = ? 
@@ -207,113 +255,10 @@ def process_withdrawals():
 # Start withdrawal processor thread
 threading.Thread(target=process_withdrawals, daemon=True).start()
 
-# ================= TELEGRAM STARS PAYMENT (NO PROVIDER NEEDED) =================
-
-@bot.message_handler(commands=['buy'])
-def buy_stars(message):
-    """Show available star packages"""
-    markup = InlineKeyboardMarkup()
-    
-    for stars, price in STAR_PACKAGES.items():
-        markup.add(InlineKeyboardButton(
-            f"💫 {stars} Stars - {price} ⭐️", 
-            callback_data=f"buy_{stars}"
-        ))
-    
-    bot.send_message(
-        message.chat.id,
-        "✨ **Purchase Stars with Telegram Stars!** ✨\n\n"
-        "Choose a package below:\n"
-        "💎 More stars = bigger discount!\n\n"
-        "⬇️ Click to buy:",
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
-def process_buy(call):
-    """Process buy button click"""
-    stars = call.data.split("_")[1]
-    price = STAR_PACKAGES[stars]
-    
-    # Create invoice - NO PROVIDER TOKEN NEEDED for Telegram Stars!
-    prices = [LabeledPrice(label=f"{stars} Stars", amount=price)]
-    
-    bot.send_invoice(
-        call.message.chat.id,
-        title=f"✨ {stars} Stars Package",
-        description=f"Get {stars} 🟡⭐ stars for your wallet!\n" +
-                   f"💰 Price: {price} ⭐️ Telegram Stars",
-        invoice_payload=f"buy_stars_{stars}",
-        provider_token="",  # EMPTY STRING for Telegram Stars!
-        currency="XTR",  # Telegram Stars currency
-        prices=prices,
-        start_parameter="create_invoice_stars",
-        photo_url="https://telegram.org/img/t_logo.png",  # Optional
-        photo_height=512,
-        photo_width=512,
-        photo_size=512,
-        need_name=False,
-        need_phone_number=False,
-        need_email=False,
-        need_shipping_address=False,
-        is_flexible=False
-    )
-
-@bot.pre_checkout_query_handler(func=lambda query: True)
-def checkout(pre_checkout_query):
-    """Handle pre-checkout - automatically approve"""
-    bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
-
-@bot.message_handler(content_types=['successful_payment'])
-def payment_success(message):
-    """Handle successful payment"""
-    payload = message.successful_payment.invoice_payload
-    stars_purchased = int(payload.split("_")[2])
-    amount_paid = message.successful_payment.total_amount
-    
-    user_id = message.from_user.id
-    
-    # Add stars to user wallet
-    add_stars(user_id, stars_purchased)
-    
-    # Log payment
-    cursor.execute("""
-        INSERT INTO payments (user_id, telegram_payment_charge_id, stars_purchased, amount_paid)
-        VALUES (?, ?, ?, ?)
-    """, (user_id, message.successful_payment.telegram_payment_charge_id, stars_purchased, amount_paid))
-    conn.commit()
-    
-    # Notify user
-    bot.send_message(
-        user_id,
-        f"✅ **Payment Successful!**\n\n"
-        f"✨ Added: {stars_purchased} 🟡⭐ stars to your wallet\n"
-        f"💳 Payment ID: `{message.successful_payment.telegram_payment_charge_id}`\n\n"
-        f"Your new balance: {get_wallet(user_id)[1]} 🟡⭐",
-        parse_mode="Markdown"
-    )
-    
-    # Notify admins
-    for admin in ADMIN_IDS:
-        try:
-            bot.send_message(
-                admin,
-                f"💰 **New Purchase!**\n"
-                f"User: `{user_id}`\n"
-                f"Stars: {stars_purchased} 🟡⭐\n"
-                f"Paid: {amount_paid} ⭐️"
-            )
-        except:
-            pass
-
-# ================= REST OF YOUR BOT CODE (unchanged) =================
-# [Keep all your existing functions here: main_menu, start_handler, earn, 
-#  profile, leaderboard, withdraw, premium, refer, etc.]
-
-# ================= COLORFUL MENU =================
+# ================= MAIN MENU =================
 
 def main_menu():
+    """Create main menu keyboard"""
     markup = InlineKeyboardMarkup()
     markup.row(
         InlineKeyboardButton("💼✨ Earn Stars", callback_data="earn"),
@@ -332,7 +277,7 @@ def main_menu():
     )
     return markup
 
-# ================= START + REFERRAL =================
+# ================= START COMMAND =================
 
 @bot.message_handler(commands=['start'])
 def start_handler(message):
@@ -349,7 +294,6 @@ def start_handler(message):
                 already = cursor.fetchone()
 
                 if not already:
-                    # Check referrer cooldown
                     cooldown = check_cooldown(referrer_id, "refer", COOLDOWN_TIME)
                     if cooldown == 0:
                         cursor.execute("INSERT INTO referrals VALUES (?,?)", (referrer_id, user_id))
@@ -363,15 +307,18 @@ def start_handler(message):
         except:
             pass
 
-    bot.send_message(user_id, "🔥 Welcome to Gold Ultimate Bot!", reply_markup=main_menu())
+    bot.send_message(
+        user_id, 
+        "🔥 Welcome to Gold Ultimate Bot!\n\nEarn stars, refer friends, and withdraw your earnings!",
+        reply_markup=main_menu()
+    )
 
-# ================= EARN WITH COOLDOWN =================
+# ================= EARN STARS =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "earn")
 def earn(call):
     user_id = call.from_user.id
     
-    # Check cooldown
     cooldown = check_cooldown(user_id, "earn", COOLDOWN_TIME)
     
     if cooldown > 0:
@@ -393,12 +340,9 @@ def earn(call):
     
     log_action(user_id, "earn")
     
-    bot.answer_callback_query(call.id, f"✅ You earned {reward} 🟡⭐")
-    
-    # Update message with new balance
     user = get_wallet(user_id)
     bot.edit_message_text(
-        f"✅ Earned {reward} 🟡⭐!\n\nNew balance: {user[1]} 🟡⭐",
+        f"✅ You earned {reward} 🟡⭐!\n\n💰 New balance: {user[1]} 🟡⭐",
         call.message.chat.id,
         call.message.message_id,
         reply_markup=main_menu()
@@ -420,7 +364,6 @@ def profile(call):
 ⭐ Current Balance: {user[1]} 🟡⭐
 
 💎 Premium: {"✅ ACTIVE" if user[4] else "❌ Not Active"}
-
 📊 Daily Withdrawn: {user[6]}/{MAX_DAILY_WITHDRAW} 🟡⭐
 """
 
@@ -441,7 +384,6 @@ def leaderboard(call):
 
     text = "🏆🎖 **TOP USERS**\n\n"
 
-    # Admins always on top
     for admin in ADMIN_IDS:
         text += f"👑 `{admin}` - ∞ 🟡⭐ (Admin)\n"
 
@@ -457,7 +399,7 @@ def leaderboard(call):
         parse_mode="Markdown"
     )
 
-# ================= WITHDRAW WITH COOLDOWN =================
+# ================= WITHDRAW =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "withdraw")
 def withdraw(call):
@@ -469,15 +411,13 @@ def withdraw(call):
         return
 
     if user[1] < MIN_WITHDRAW:
-        bot.answer_callback_query(call.id, f"Minimum withdrawal is {MIN_WITHDRAW} 🟡⭐", show_alert=True)
+        bot.answer_callback_query(call.id, f"❌ Minimum withdrawal is {MIN_WITHDRAW} 🟡⭐", show_alert=True)
         return
     
-    # Check daily limit
     if user[6] >= MAX_DAILY_WITHDRAW:
         bot.answer_callback_query(call.id, f"❌ Daily withdrawal limit ({MAX_DAILY_WITHDRAW} 🟡⭐) reached!", show_alert=True)
         return
     
-    # Check withdrawal cooldown
     cooldown = check_cooldown(user_id, "withdraw", WITHDRAWAL_COOLDOWN)
     if cooldown > 0:
         hours = cooldown // 3600
@@ -489,18 +429,15 @@ def withdraw(call):
         )
         return
 
-    # Calculate allowed withdrawal amount
     max_allowed = MAX_DAILY_WITHDRAW - user[6]
     withdraw_amount = min(user[1], max_allowed)
 
-    # Create withdrawal request
     cursor.execute("""
         INSERT INTO withdraw_requests (user_id, amount, status)
         VALUES (?, ?, 'pending')
     """, (user_id, withdraw_amount))
     conn.commit()
     
-    # Update daily withdrawn
     cursor.execute("""
         UPDATE users_wallet 
         SET daily_withdrawn = daily_withdrawn + ? 
@@ -516,7 +453,41 @@ def withdraw(call):
         show_alert=True
     )
 
-# ================= BUY MENU =================
+# ================= REFERRAL LINK =================
+
+@bot.callback_query_handler(func=lambda c: c.data == "refer")
+def refer(call):
+    user_id = call.from_user.id
+    bot_name = bot.get_me().username
+    refer_link = f"https://t.me/{bot_name}?start={user_id}"
+    
+    bot.edit_message_text(
+        f"📨🔥 **Refer & Earn**\n\n"
+        f"Share your referral link and earn 5 🟡⭐ for each friend who joins!\n\n"
+        f"🔗 **Your link:**\n`{refer_link}`\n\n"
+        f"📊 Total Referrals: {get_wallet(user_id)[3]}",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=main_menu(),
+        parse_mode="Markdown"
+    )
+
+# ================= PREMIUM =================
+
+@bot.callback_query_handler(func=lambda c: c.data == "premium")
+def premium(call):
+    cursor.execute("UPDATE users_wallet SET premium=1 WHERE user_id=?", (call.from_user.id,))
+    conn.commit()
+    bot.answer_callback_query(call.id, "💎 Premium Activated!")
+    
+    bot.edit_message_text(
+        "✅ Premium activated! You now have access to withdrawals and exclusive features!",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=main_menu()
+    )
+
+# ================= BUY STARS MENU =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "buy_menu")
 def buy_menu(call):
@@ -555,32 +526,70 @@ def buy_show(call):
         parse_mode="Markdown"
     )
 
-# ================= PREMIUM =================
-
-@bot.callback_query_handler(func=lambda c: c.data == "premium")
-def premium(call):
-    cursor.execute("UPDATE users_wallet SET premium=1 WHERE user_id=?", (call.from_user.id,))
-    conn.commit()
-    bot.answer_callback_query(call.id, "💎 Premium Activated!")
-
-# ================= REFERRAL LINK =================
-
-@bot.callback_query_handler(func=lambda c: c.data == "refer")
-def refer(call):
-    user_id = call.from_user.id
-    bot_name = bot.get_me().username
-    refer_link = f"https://t.me/{bot_name}?start={user_id}"
+@bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
+def process_buy(call):
+    stars = call.data.split("_")[1]
+    price = STAR_PACKAGES[stars]
     
-    bot.edit_message_text(
-        f"📨🔥 **Refer & Earn**\n\n"
-        f"Share your referral link and earn 5 🟡⭐ for each friend who joins!\n\n"
-        f"🔗 **Your link:**\n`{refer_link}`\n\n"
-        f"📊 Total Referrals: {get_wallet(user_id)[3]}",
+    prices = [LabeledPrice(label=f"{stars} Stars", amount=price)]
+    
+    bot.send_invoice(
         call.message.chat.id,
-        call.message.message_id,
-        reply_markup=main_menu(),
+        title=f"✨ {stars} Stars Package",
+        description=f"Get {stars} 🟡⭐ stars for your wallet!\n" +
+                   f"💰 Price: {price} ⭐️ Telegram Stars",
+        invoice_payload=f"buy_stars_{stars}",
+        provider_token="",  # Empty for Telegram Stars!
+        currency="XTR",
+        prices=prices,
+        start_parameter="create_invoice_stars",
+        need_name=False,
+        need_phone_number=False,
+        need_email=False,
+        need_shipping_address=False,
+        is_flexible=False
+    )
+
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def checkout(pre_checkout_query):
+    bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@bot.message_handler(content_types=['successful_payment'])
+def payment_success(message):
+    payload = message.successful_payment.invoice_payload
+    stars_purchased = int(payload.split("_")[2])
+    amount_paid = message.successful_payment.total_amount
+    
+    user_id = message.from_user.id
+    
+    add_stars(user_id, stars_purchased)
+    
+    cursor.execute("""
+        INSERT INTO payments (user_id, telegram_payment_charge_id, stars_purchased, amount_paid)
+        VALUES (?, ?, ?, ?)
+    """, (user_id, message.successful_payment.telegram_payment_charge_id, stars_purchased, amount_paid))
+    conn.commit()
+    
+    bot.send_message(
+        user_id,
+        f"✅ **Payment Successful!**\n\n"
+        f"✨ Added: {stars_purchased} 🟡⭐ stars to your wallet\n"
+        f"💳 Payment ID: `{message.successful_payment.telegram_payment_charge_id}`\n\n"
+        f"💰 New balance: {get_wallet(user_id)[1]} 🟡⭐",
         parse_mode="Markdown"
     )
+    
+    for admin in ADMIN_IDS:
+        try:
+            bot.send_message(
+                admin,
+                f"💰 **New Purchase!**\n"
+                f"User: `{user_id}`\n"
+                f"Stars: {stars_purchased} 🟡⭐\n"
+                f"Paid: {amount_paid} ⭐️"
+            )
+        except:
+            pass
 
 # ================= BACK BUTTON =================
 
@@ -597,11 +606,12 @@ def back(call):
 
 def daily_admin_bonus():
     while True:
-        time.sleep(86400)
-        reset_daily_withdrawals()  # Reset daily limits
+        time.sleep(86400)  # 24 hours
+        reset_daily_withdrawals()
         for admin in ADMIN_IDS:
             cursor.execute("UPDATE users_wallet SET stars = stars + 100 WHERE user_id=?", (admin,))
         conn.commit()
+        print("✅ Admin daily bonus added")
 
 threading.Thread(target=daily_admin_bonus, daemon=True).start()
 
@@ -611,67 +621,101 @@ def backup_to_github():
     if not GITHUB_TOKEN or not GITHUB_REPO:
         return
 
-    with open("bot.db", "rb") as f:
-        content = base64.b64encode(f.read()).decode()
+    try:
+        with open("bot.db", "rb") as f:
+            content = base64.b64encode(f.read()).decode()
 
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE_PATH}"
+        headers = {"Authorization": f"token {GITHUB_TOKEN}"}
 
-    r = requests.get(url, headers=headers)
-    sha = None
-    if r.status_code == 200:
-        sha = r.json()["sha"]
+        r = requests.get(url, headers=headers)
+        sha = None
+        if r.status_code == 200:
+            sha = r.json()["sha"]
 
-    data = {
-        "message": "Auto backup",
-        "content": content
-    }
+        data = {
+            "message": f"Auto backup {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "content": content
+        }
 
-    if sha:
-        data["sha"] = sha
+        if sha:
+            data["sha"] = sha
 
-    requests.put(url, json=data, headers=headers)
+        response = requests.put(url, json=data, headers=headers)
+        if response.status_code in [200, 201]:
+            print(f"✅ Database backed up to GitHub: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        else:
+            print(f"❌ GitHub backup failed: {response.status_code}")
+    except Exception as e:
+        print(f"❌ GitHub backup error: {e}")
 
 def backup_loop():
     while True:
-        time.sleep(3600)
+        time.sleep(3600)  # Every hour
         backup_to_github()
 
-threading.Thread(target=backup_loop, daemon=True).start()
+if GITHUB_TOKEN and GITHUB_REPO:
+    threading.Thread(target=backup_loop, daemon=True).start()
+    print("✅ GitHub backup system started")
 
-# ================= KEEP ALIVE =================
+# ================= WEBHOOK SETUP =================
 
-@app.route("/")
-def index():
-    return "🔥 Gold Ultimate Bot Running with Stars Payment!"
-
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    bot.process_new_updates([telebot.types.Update.de_json(request.stream.read().decode("utf-8"))])
-    return "OK", 200
-
-def get_render_url():
-    """Get Render URL automatically"""
+def setup_webhook():
+    """Setup webhook automatically using Render URL"""
     render_url = os.getenv("RENDER_EXTERNAL_URL")
-    if render_url:
-        return render_url
     
-    # Fallback for local development
-    return None
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    
-    # Setup webhook or polling
-    render_url = get_render_url()
     if render_url:
         webhook_url = f"{render_url}/{TOKEN}"
         bot.remove_webhook()
+        time.sleep(1)
         bot.set_webhook(url=webhook_url)
         print(f"✅ Webhook set to: {webhook_url}")
+        return True
     else:
-        print("⚠️ Running in polling mode for local development...")
-        bot.remove_webhook()
-        threading.Thread(target=bot.infinity_polling, daemon=True).start()
+        print("⚠️ RENDER_EXTERNAL_URL not found. Running in polling mode...")
+        return False
+
+# ================= FLASK WEBHOOK ENDPOINT =================
+
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    """Handle incoming Telegram updates"""
+    try:
+        json_str = request.get_data().decode('UTF-8')
+        update = telebot.types.Update.de_json(json_str)
+        bot.process_new_updates([update])
+        return 'OK', 200
+    except Exception as e:
+        print(f"❌ Webhook error: {e}")
+        return 'ERROR', 500
+
+# ================= MAIN EXECUTION =================
+
+if __name__ == "__main__":
+    print("🚀 Starting Gold Ultimate Bot...")
+    print("=" * 50)
+    print("💰 Earning System: Active")
+    print("👥 Referral System: Active")
+    print("💳 Withdrawal System: Active")
+    print("⭐ Telegram Stars: Active")
+    print("🛡️ Anti-Spam Cooldown: Active")
+    print("💾 GitHub Backup: " + ("Active" if GITHUB_TOKEN and GITHUB_REPO else "Disabled"))
+    print("=" * 50)
     
-    app.run(host="0.0.0.0", port=port)
+    # Setup webhook or polling
+    using_webhook = setup_webhook()
+    
+    # Start keep-alive service
+    global keep_alive
+    if RENDER_EXTERNAL_URL:
+        health_url = f"{RENDER_EXTERNAL_URL}/health"
+        keep_alive = KeepAliveService(health_url)
+        keep_alive.start()
+    else:
+        # Local development - ping localhost
+        keep_alive = KeepAliveService(f"http://localhost:{os.environ.get('PORT', 10000)}/health")
+        keep_alive.start()
+    
+    # Start Flask server
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
