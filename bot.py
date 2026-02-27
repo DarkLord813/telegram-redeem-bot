@@ -1503,187 +1503,6 @@ def admin_panel(call):
         parse_mode="Markdown"
     )
 
-# ================= ADMIN REDEEM CODE MANAGEMENT =================
-
-@bot.callback_query_handler(func=lambda c: c.data == "admin_codes")
-def admin_codes(call):
-    user_id = call.from_user.id
-    if not is_admin(user_id):
-        return
-    
-    text = """
-━━━━━━━━━━━━━━━━━━━━━
-🎫 **REDEEM CODE MANAGEMENT** 🎫
-━━━━━━━━━━━━━━━━━━━━━
-
-Create and manage promo codes for users to redeem stars.
-
-📝 **What are redeem codes?**
-• One-time use codes
-• Give specific star amounts
-• Track who redeemed them
-• Set expiration dates
-
-━━━━━━━━━━━━━━━━━━━━━
-👇 **Choose an option:**
-"""
-    
-    markup = InlineKeyboardMarkup()
-    markup.row(
-        InlineKeyboardButton("➕ CREATE CODE ➕", callback_data="admin_create_code"),
-        InlineKeyboardButton("📋 LIST CODES 📋", callback_data="admin_list_codes")
-    )
-    markup.row(
-        InlineKeyboardButton("🔙 BACK TO ADMIN 🔙", callback_data="admin_panel")
-    )
-    
-    bot.edit_message_text(
-        text,
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
-
-@bot.callback_query_handler(func=lambda c: c.data == "admin_create_code")
-def admin_create_code(call):
-    user_id = call.from_user.id
-    if not is_admin(user_id):
-        return
-    
-    text = """
-━━━━━━━━━━━━━━━━━━━━━
-➕ **CREATE REDEEM CODE** ➕
-━━━━━━━━━━━━━━━━━━━━━
-
-Please enter the star amount for this code:
-
-💰 **Example:** 100
-💡 The code will give users this many 🟡⭐
-"""
-    
-    # Store session
-    session_data = {
-        "stage": "code_amount",
-        "data": {}
-    }
-    cursor.execute("""
-        INSERT OR REPLACE INTO admin_sessions (admin_id, session_data, updated_at)
-        VALUES (?, ?, ?)
-    """, (user_id, str(session_data), datetime.now()))
-    conn.commit()
-    
-    markup = InlineKeyboardMarkup()
-    markup.row(
-        InlineKeyboardButton("❌ CANCEL ❌", callback_data="admin_codes")
-    )
-    
-    bot.edit_message_text(
-        text,
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
-
-@bot.callback_query_handler(func=lambda c: c.data == "admin_list_codes")
-def admin_list_codes(call):
-    user_id = call.from_user.id
-    if not is_admin(user_id):
-        return
-    
-    codes = get_redeem_codes(admin_id=user_id, limit=10)
-    
-    if not codes:
-        text = """
-━━━━━━━━━━━━━━━━━━━━━
-📋 **YOUR REDEEM CODES** 📋
-━━━━━━━━━━━━━━━━━━━━━
-
-❌ No codes found.
-
-Create your first code using the "CREATE CODE" button!
-━━━━━━━━━━━━━━━━━━━━━
-"""
-    else:
-        text = """
-━━━━━━━━━━━━━━━━━━━━━
-📋 **YOUR REDEEM CODES** 📋
-━━━━━━━━━━━━━━━━━━━━━
-"""
-        for code in codes:
-            code_id, code_str, amount, created_at, expires_at, max_uses, used_count, active = code
-            status = "✅ ACTIVE" if active else "❌ INACTIVE"
-            text += f"\n🎫 **Code:** `{code_str}`\n"
-            text += f"💰 **Amount:** {amount} 🟡⭐\n"
-            text += f"📊 **Used:** {used_count}/{max_uses}\n"
-            text += f"📅 **Expires:** {expires_at[:10]}\n"
-            text += f"⚡ **Status:** {status}\n"
-            text += "━━━━━━━━━━━━━━━━━━━━━\n"
-    
-    markup = InlineKeyboardMarkup()
-    markup.row(
-        InlineKeyboardButton("➕ CREATE NEW ➕", callback_data="admin_create_code"),
-        InlineKeyboardButton("🔄 REFRESH 🔄", callback_data="admin_list_codes")
-    )
-    markup.row(
-        InlineKeyboardButton("❌ DEACTIVATE CODE ❌", callback_data="admin_deactivate_code")
-    )
-    markup.row(
-        InlineKeyboardButton("🔙 BACK 🔙", callback_data="admin_codes")
-    )
-    
-    bot.edit_message_text(
-        text,
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
-
-@bot.callback_query_handler(func=lambda c: c.data == "admin_deactivate_code")
-def admin_deactivate_code_prompt(call):
-    user_id = call.from_user.id
-    if not is_admin(user_id):
-        return
-    
-    text = """
-━━━━━━━━━━━━━━━━━━━━━
-❌ **DEACTIVATE CODE** ❌
-━━━━━━━━━━━━━━━━━━━━━
-
-Please enter the Code ID you want to deactivate:
-
-📝 You can find Code IDs in the list above.
-
-⚠️ **Warning:** Deactivated codes cannot be used!
-━━━━━━━━━━━━━━━━━━━━━
-"""
-    
-    # Store session
-    session_data = {
-        "stage": "deactivate_code",
-        "data": {}
-    }
-    cursor.execute("""
-        INSERT OR REPLACE INTO admin_sessions (admin_id, session_data, updated_at)
-        VALUES (?, ?, ?)
-    """, (user_id, str(session_data), datetime.now()))
-    conn.commit()
-    
-    markup = InlineKeyboardMarkup()
-    markup.row(
-        InlineKeyboardButton("❌ CANCEL ❌", callback_data="admin_codes")
-    )
-    
-    bot.edit_message_text(
-        text,
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
-
 # ================= ADMIN TASK MANAGEMENT =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "admin_tasks")
@@ -1863,6 +1682,187 @@ All task completion records will also be deleted.
     markup = InlineKeyboardMarkup()
     markup.row(
         InlineKeyboardButton("❌ CANCEL ❌", callback_data="admin_tasks")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+# ================= ADMIN REDEEM CODE MANAGEMENT =================
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_codes")
+def admin_codes(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    text = """
+━━━━━━━━━━━━━━━━━━━━━
+🎫 **REDEEM CODE MANAGEMENT** 🎫
+━━━━━━━━━━━━━━━━━━━━━
+
+Create and manage promo codes for users to redeem stars.
+
+📝 **What are redeem codes?**
+• One-time use codes
+• Give specific star amounts
+• Track who redeemed them
+• Set expiration dates
+
+━━━━━━━━━━━━━━━━━━━━━
+👇 **Choose an option:**
+"""
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("➕ CREATE CODE ➕", callback_data="admin_create_code"),
+        InlineKeyboardButton("📋 LIST CODES 📋", callback_data="admin_list_codes")
+    )
+    markup.row(
+        InlineKeyboardButton("🔙 BACK TO ADMIN 🔙", callback_data="admin_panel")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_create_code")
+def admin_create_code(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    text = """
+━━━━━━━━━━━━━━━━━━━━━
+➕ **CREATE REDEEM CODE** ➕
+━━━━━━━━━━━━━━━━━━━━━
+
+Please enter the star amount for this code:
+
+💰 **Example:** 100
+💡 The code will give users this many 🟡⭐
+"""
+    
+    # Store session
+    session_data = {
+        "stage": "code_amount",
+        "data": {}
+    }
+    cursor.execute("""
+        INSERT OR REPLACE INTO admin_sessions (admin_id, session_data, updated_at)
+        VALUES (?, ?, ?)
+    """, (user_id, str(session_data), datetime.now()))
+    conn.commit()
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("❌ CANCEL ❌", callback_data="admin_codes")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_list_codes")
+def admin_list_codes(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    codes = get_redeem_codes(admin_id=user_id, limit=10)
+    
+    if not codes:
+        text = """
+━━━━━━━━━━━━━━━━━━━━━
+📋 **YOUR REDEEM CODES** 📋
+━━━━━━━━━━━━━━━━━━━━━
+
+❌ No codes found.
+
+Create your first code using the "CREATE CODE" button!
+━━━━━━━━━━━━━━━━━━━━━
+"""
+    else:
+        text = """
+━━━━━━━━━━━━━━━━━━━━━
+📋 **YOUR REDEEM CODES** 📋
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        for code in codes:
+            code_id, code_str, amount, created_at, expires_at, max_uses, used_count, active = code
+            status = "✅ ACTIVE" if active else "❌ INACTIVE"
+            text += f"\n🎫 **Code:** `{code_str}`\n"
+            text += f"💰 **Amount:** {amount} 🟡⭐\n"
+            text += f"📊 **Used:** {used_count}/{max_uses}\n"
+            text += f"📅 **Expires:** {expires_at[:10]}\n"
+            text += f"⚡ **Status:** {status}\n"
+            text += "━━━━━━━━━━━━━━━━━━━━━\n"
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("➕ CREATE NEW ➕", callback_data="admin_create_code"),
+        InlineKeyboardButton("🔄 REFRESH 🔄", callback_data="admin_list_codes")
+    )
+    markup.row(
+        InlineKeyboardButton("❌ DEACTIVATE CODE ❌", callback_data="admin_deactivate_code")
+    )
+    markup.row(
+        InlineKeyboardButton("🔙 BACK 🔙", callback_data="admin_codes")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_deactivate_code")
+def admin_deactivate_code_prompt(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    text = """
+━━━━━━━━━━━━━━━━━━━━━
+❌ **DEACTIVATE CODE** ❌
+━━━━━━━━━━━━━━━━━━━━━
+
+Please enter the Code ID you want to deactivate:
+
+📝 You can find Code IDs in the list above.
+
+⚠️ **Warning:** Deactivated codes cannot be used!
+━━━━━━━━━━━━━━━━━━━━━
+"""
+    
+    # Store session
+    session_data = {
+        "stage": "deactivate_code",
+        "data": {}
+    }
+    cursor.execute("""
+        INSERT OR REPLACE INTO admin_sessions (admin_id, session_data, updated_at)
+        VALUES (?, ?, ?)
+    """, (user_id, str(session_data), datetime.now()))
+    conn.commit()
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("❌ CANCEL ❌", callback_data="admin_codes")
     )
     
     bot.edit_message_text(
@@ -2174,662 +2174,6 @@ def admin_backup_now(call):
             bot.send_message(call.message.chat.id, "❌ **Backup failed!** Check logs.", parse_mode="Markdown")
     
     threading.Thread(target=do_backup, daemon=True).start()
-
-# ================= HANDLE ALL TEXT MESSAGES (FIXED TASK CREATION FLOW) =================
-
-@bot.message_handler(func=lambda message: True)
-def handle_all_messages(message):
-    """Handle all text messages including task creation, withdrawals, and redeem codes"""
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    text = message.text.strip()
-    
-    print(f"📨 Message from {user_id}: {text[:50]}...")  # Debug log
-    
-    # First, check if this is for redeem code
-    cursor.execute("""
-        SELECT action_type FROM user_actions 
-        WHERE user_id = ? AND action_type = 'awaiting_redeem_code'
-        ORDER BY action_time DESC LIMIT 1
-    """, (user_id,))
-    
-    redeem_session = cursor.fetchone()
-    if redeem_session:
-        # Process redeem code
-        success, result_message = redeem_code(user_id, text)
-        
-        # Clear the waiting state
-        cursor.execute("DELETE FROM user_actions WHERE user_id=? AND action_type=?", (user_id, "awaiting_redeem_code"))
-        conn.commit()
-        
-        if success:
-            # Get updated balance
-            user = get_wallet(user_id)
-            user_name = get_user_display_name(user_id)
-            
-            response = f"""
-━━━━━━━━━━━━━━━━━━━━━
-✅ **CODE REDEEMED!** ✅
-━━━━━━━━━━━━━━━━━━━━━
-
-👤 **{user_name}**
-
-{result_message}
-
-━━━━━━━━━━━━━━━━━━━━━
-💰 **New Balance:** {user[1]} 🟡⭐
-━━━━━━━━━━━━━━━━━━━━━
-"""
-        else:
-            response = f"""
-━━━━━━━━━━━━━━━━━━━━━
-❌ **REDEMPTION FAILED** ❌
-━━━━━━━━━━━━━━━━━━━━━
-
-{result_message}
-
-━━━━━━━━━━━━━━━━━━━━━
-"""
-        
-        # Check if user is admin to show admin panel option
-        markup = main_menu()
-        if is_admin(user_id):
-            admin_markup = InlineKeyboardMarkup()
-            admin_markup.row(
-                InlineKeyboardButton("💼✨ EARN STARS 💼✨", callback_data="earn"),
-                InlineKeyboardButton("📋✅ TASKS 📋✅", callback_data="show_tasks")
-            )
-            admin_markup.row(
-                InlineKeyboardButton("📨🔥 REFER & EARN 📨🔥", callback_data="refer"),
-                InlineKeyboardButton("👤🌈 PROFILE 👤🌈", callback_data="profile")
-            )
-            admin_markup.row(
-                InlineKeyboardButton("🏆🎖 LEADERBOARD 🏆🎖", callback_data="leaderboard"),
-                InlineKeyboardButton("💎🚀 PREMIUM 💎🚀", callback_data="premium")
-            )
-            admin_markup.row(
-                InlineKeyboardButton("🟡💰 BUY STARS 🟡💰", callback_data="buy_menu"),
-                InlineKeyboardButton("💳🏦 WITHDRAW 💳🏦", callback_data="withdraw_menu")
-            )
-            admin_markup.row(
-                InlineKeyboardButton("🎫 REDEEM CODE 🎫", callback_data="redeem_menu")
-            )
-            admin_markup.row(
-                InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
-            )
-            markup = admin_markup
-        
-        bot.send_message(
-            chat_id,
-            response,
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
-        return True
-    
-    # Then check if this is for admin task creation
-    if is_admin(user_id):
-        # Check for active admin session
-        cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,))
-        session = cursor.fetchone()
-        
-        if session:
-            import ast
-            try:
-                session_data = ast.literal_eval(session[0])
-                stage = session_data.get("stage")
-                
-                # Handle code amount input
-                if stage == "code_amount":
-                    try:
-                        amount = int(text)
-                        if amount <= 0:
-                            bot.send_message(chat_id, "❌ Amount must be a positive number! Please try again:")
-                            return True
-                        
-                        session_data["data"]["amount"] = amount
-                        session_data["stage"] = "code_expiry"
-                        
-                        cursor.execute("""
-                            UPDATE admin_sessions SET session_data=?, updated_at=? WHERE admin_id=?
-                        """, (str(session_data), datetime.now(), user_id))
-                        conn.commit()
-                        
-                        bot.send_message(
-                            chat_id,
-                            f"✅ Amount set to: **{amount}** 🟡⭐\n\n"
-                            "📅 **Step 2/3: Code Expiry**\n"
-                            "Please enter the number of days this code should be valid:\n\n"
-                            "💡 Example: 30 (for 30 days)\n"
-                            "💡 Enter 0 for no expiry",
-                            parse_mode="Markdown"
-                        )
-                        return True
-                        
-                    except ValueError:
-                        bot.send_message(chat_id, "❌ Please enter a valid number for the amount!")
-                        return True
-                
-                # Handle code expiry input
-                elif stage == "code_expiry":
-                    try:
-                        days = int(text)
-                        session_data["data"]["expiry_days"] = days
-                        session_data["stage"] = "code_uses"
-                        
-                        cursor.execute("""
-                            UPDATE admin_sessions SET session_data=?, updated_at=? WHERE admin_id=?
-                        """, (str(session_data), datetime.now(), user_id))
-                        conn.commit()
-                        
-                        bot.send_message(
-                            chat_id,
-                            "🔄 **Step 3/3: Maximum Uses**\n\n"
-                            "Please enter the maximum number of times this code can be used:\n\n"
-                            "💡 Example: 1 (single use)\n"
-                            "💡 Example: 10 (multiple uses)\n"
-                            "💡 Enter 0 for unlimited",
-                            parse_mode="Markdown"
-                        )
-                        return True
-                        
-                    except ValueError:
-                        bot.send_message(chat_id, "❌ Please enter a valid number for days!")
-                        return True
-                
-                # Handle code uses input and create code
-                elif stage == "code_uses":
-                    try:
-                        max_uses = int(text)
-                        if max_uses <= 0:
-                            max_uses = 999999  # Unlimited
-                        
-                        amount = session_data["data"]["amount"]
-                        expiry_days = session_data["data"]["expiry_days"]
-                        
-                        # Create the code
-                        code = create_redeem_code(user_id, amount, expiry_days, max_uses)
-                        
-                        # Clear session
-                        cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
-                        conn.commit()
-                        
-                        # Trigger backup
-                        if GITHUB_TOKEN and GITHUB_REPO:
-                            threading.Thread(target=backup_to_github, args=("new_code", f"Admin created code for {amount} stars"), daemon=True).start()
-                        
-                        response = f"""
-━━━━━━━━━━━━━━━━━━━━━
-✅ **CODE CREATED SUCCESSFULLY!** ✅
-━━━━━━━━━━━━━━━━━━━━━
-
-🎫 **Code:** `{code}`
-
-💰 **Amount:** {amount} 🟡⭐
-📅 **Expires:** {expiry_days if expiry_days > 0 else 'Never'} days
-🔄 **Max Uses:** {'Unlimited' if max_uses > 1000 else max_uses}
-
-━━━━━━━━━━━━━━━━━━━━━
-📤 Share this code with users!
-━━━━━━━━━━━━━━━━━━━━━
-"""
-                        
-                        bot.send_message(chat_id, response, parse_mode="Markdown")
-                        
-                        # Show admin panel
-                        admin_panel_callback = type('obj', (object,), {
-                            'message': type('obj', (object,), {
-                                'chat': {'id': chat_id},
-                                'message_id': None
-                            })
-                        })
-                        admin_panel_callback.message.chat.id = chat_id
-                        admin_panel_callback.message.message_id = None
-                        admin_panel(admin_panel_callback)
-                        return True
-                        
-                    except ValueError:
-                        bot.send_message(chat_id, "❌ Please enter a valid number for max uses!")
-                        return True
-                
-                # Handle deactivate code
-                elif stage == "deactivate_code":
-                    try:
-                        code_id = int(text)
-                        if deactivate_redeem_code(code_id):
-                            bot.send_message(chat_id, f"✅ Code #{code_id} has been deactivated!")
-                        else:
-                            bot.send_message(chat_id, f"❌ Code #{code_id} not found!")
-                        
-                        # Clear session
-                        cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
-                        conn.commit()
-                        
-                        # Show codes list
-                        admin_list_codes_callback = type('obj', (object,), {
-                            'message': type('obj', (object,), {
-                                'chat': {'id': chat_id},
-                                'message_id': None
-                            })
-                        })
-                        admin_list_codes_callback.message.chat.id = chat_id
-                        admin_list_codes_callback.message.message_id = None
-                        admin_list_codes(admin_list_codes_callback)
-                        return True
-                        
-                    except ValueError:
-                        bot.send_message(chat_id, "❌ Please enter a valid Code ID!")
-                        return True
-                
-                # Handle task name input
-                elif stage == "task_name":
-                    # Store task name
-                    session_data["data"]["name"] = text
-                    session_data["stage"] = "task_type"
-                    
-                    cursor.execute("""
-                        UPDATE admin_sessions SET session_data=?, updated_at=? WHERE admin_id=?
-                    """, (str(session_data), datetime.now(), user_id))
-                    conn.commit()
-                    
-                    markup = InlineKeyboardMarkup()
-                    markup.row(
-                        InlineKeyboardButton("📢 JOIN CHANNEL", callback_data="admin_task_type_join_channel"),
-                        InlineKeyboardButton("👥 JOIN GROUP", callback_data="admin_task_type_join_group")
-                    )
-                    markup.row(
-                        InlineKeyboardButton("🔗 VISIT LINK", callback_data="admin_task_type_visit_link"),
-                        InlineKeyboardButton("🎥 WATCH VIDEO", callback_data="admin_task_type_watch_video")
-                    )
-                    markup.row(
-                        InlineKeyboardButton("❌ CANCEL ❌", callback_data="admin_tasks")
-                    )
-                    
-                    bot.send_message(
-                        chat_id,
-                        f"✅ Task name set to: **{text}**\n\n"
-                        "📝 **Step 2/4: Task Type**\n"
-                        "Please choose the task type:",
-                        reply_markup=markup,
-                        parse_mode="Markdown"
-                    )
-                    return True
-                
-                # Handle task data input (links, channel names, etc.)
-                elif stage == "task_data":
-                    # Store task data
-                    task_type = session_data["data"].get("type")
-                    session_data["data"]["data"] = text
-                    session_data["stage"] = "task_reward"
-                    
-                    cursor.execute("""
-                        UPDATE admin_sessions SET session_data=?, updated_at=? WHERE admin_id=?
-                    """, (str(session_data), datetime.now(), user_id))
-                    conn.commit()
-                    
-                    bot.send_message(
-                        chat_id,
-                        f"✅ Task data saved!\n\n"
-                        "💰 **Step 3/4: Task Reward**\n"
-                        "Please enter the reward amount (in 🟡⭐):\n\n"
-                        "💡 Example: 50",
-                        parse_mode="Markdown"
-                    )
-                    return True
-                
-                # Handle task reward input
-                elif stage == "task_reward":
-                    try:
-                        reward = int(text)
-                        if reward <= 0:
-                            bot.send_message(chat_id, "❌ Reward must be a positive number! Please try again:")
-                            return True
-                        
-                        session_data["data"]["reward"] = reward
-                        
-                        # Save the complete task
-                        task_name = session_data["data"]["name"]
-                        task_type = session_data["data"]["type"]
-                        task_data = session_data["data"]["data"]
-                        created_by = user_id
-                        
-                        cursor.execute("""
-                            INSERT INTO tasks (task_name, task_type, task_data, reward, created_by)
-                            VALUES (?, ?, ?, ?, ?)
-                        """, (task_name, task_type, task_data, reward, created_by))
-                        conn.commit()
-                        
-                        # Clear session
-                        cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
-                        conn.commit()
-                        
-                        # Trigger backup
-                        if GITHUB_TOKEN and GITHUB_REPO:
-                            threading.Thread(target=backup_to_github, args=("new_task", f"Admin created task: {task_name}"), daemon=True).start()
-                        
-                        bot.send_message(
-                            chat_id,
-                            f"✅ **Task Created Successfully!**\n\n"
-                            f"📝 **Name:** {task_name}\n"
-                            f"💰 **Reward:** {reward} 🟡⭐\n"
-                            f"📊 **Type:** {task_type}\n"
-                            f"🔗 **Data:** {task_data}\n\n"
-                            f"The task is now available for users!",
-                            parse_mode="Markdown"
-                        )
-                        
-                        # Show admin panel
-                        admin_panel_callback = type('obj', (object,), {
-                            'message': type('obj', (object,), {
-                                'chat': {'id': chat_id},
-                                'message_id': None
-                            })
-                        })
-                        admin_panel_callback.message.chat.id = chat_id
-                        admin_panel_callback.message.message_id = None
-                        admin_panel(admin_panel_callback)
-                        
-                        return True
-                        
-                    except ValueError:
-                        bot.send_message(chat_id, "❌ Please enter a valid number for the reward!")
-                        return True
-                
-                # Handle edit field inputs
-                elif stage == "edit_name":
-                    task_id = session_data["data"]["edit_task_id"]
-                    cursor.execute("UPDATE tasks SET task_name=? WHERE id=?", (text, task_id))
-                    conn.commit()
-                    
-                    bot.send_message(chat_id, f"✅ Task name updated to: **{text}**", parse_mode="Markdown")
-                    
-                    # Clear session
-                    cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
-                    conn.commit()
-                    
-                    # Show updated task list
-                    admin_tasks_callback = type('obj', (object,), {
-                        'message': type('obj', (object,), {
-                            'chat': {'id': chat_id},
-                            'message_id': None
-                        })
-                    })
-                    admin_tasks_callback.message.chat.id = chat_id
-                    admin_tasks_callback.message.message_id = None
-                    admin_tasks(admin_tasks_callback)
-                    return True
-                
-                elif stage == "edit_reward":
-                    try:
-                        reward = int(text)
-                        task_id = session_data["data"]["edit_task_id"]
-                        cursor.execute("UPDATE tasks SET reward=? WHERE id=?", (reward, task_id))
-                        conn.commit()
-                        
-                        bot.send_message(chat_id, f"✅ Task reward updated to: **{reward}** 🟡⭐", parse_mode="Markdown")
-                        
-                        # Clear session
-                        cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
-                        conn.commit()
-                        
-                        # Show updated task list
-                        admin_tasks_callback = type('obj', (object,), {
-                            'message': type('obj', (object,), {
-                                'chat': {'id': chat_id},
-                                'message_id': None
-                            })
-                        })
-                        admin_tasks_callback.message.chat.id = chat_id
-                        admin_tasks_callback.message.message_id = None
-                        admin_tasks(admin_tasks_callback)
-                        return True
-                        
-                    except ValueError:
-                        bot.send_message(chat_id, "❌ Please enter a valid number for the reward!")
-                        return True
-                
-                elif stage == "edit_data":
-                    task_id = session_data["data"]["edit_task_id"]
-                    cursor.execute("UPDATE tasks SET task_data=? WHERE id=?", (text, task_id))
-                    conn.commit()
-                    
-                    bot.send_message(chat_id, f"✅ Task data updated to: **{text}**", parse_mode="Markdown")
-                    
-                    # Clear session
-                    cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
-                    conn.commit()
-                    
-                    # Show updated task list
-                    admin_tasks_callback = type('obj', (object,), {
-                        'message': type('obj', (object,), {
-                            'chat': {'id': chat_id},
-                            'message_id': None
-                        })
-                    })
-                    admin_tasks_callback.message.chat.id = chat_id
-                    admin_tasks_callback.message.message_id = None
-                    admin_tasks(admin_tasks_callback)
-                    return True
-                
-                elif stage == "edit_task_id":
-                    try:
-                        task_id = int(text)
-                        # Check if task exists
-                        cursor.execute("SELECT * FROM tasks WHERE id=?", (task_id,))
-                        task = cursor.fetchone()
-                        
-                        if not task:
-                            bot.send_message(chat_id, "❌ Task not found! Please enter a valid Task ID.")
-                            return True
-                        
-                        session_data["data"]["edit_task_id"] = task_id
-                        session_data["stage"] = "edit_field"
-                        
-                        cursor.execute("""
-                            UPDATE admin_sessions SET session_data=?, updated_at=? WHERE admin_id=?
-                        """, (str(session_data), datetime.now(), user_id))
-                        conn.commit()
-                        
-                        task_id, name, t_type, data, reward, max_comp, completed, active, created_by, created = task
-                        
-                        markup = InlineKeyboardMarkup()
-                        markup.row(
-                            InlineKeyboardButton("📝 NAME", callback_data="edit_name"),
-                            InlineKeyboardButton("💰 REWARD", callback_data="edit_reward")
-                        )
-                        markup.row(
-                            InlineKeyboardButton("📊 TYPE", callback_data="edit_type"),
-                            InlineKeyboardButton("🔗 DATA", callback_data="edit_data")
-                        )
-                        markup.row(
-                            InlineKeyboardButton("⚡ ACTIVE", callback_data="edit_active"),
-                            InlineKeyboardButton("❌ CANCEL", callback_data="admin_tasks")
-                        )
-                        
-                        status = "✅ ACTIVE" if active else "❌ INACTIVE"
-                        bot.send_message(
-                            chat_id,
-                            f"📋 **Editing Task #{task_id}**\n\n"
-                            f"📝 **Name:** {name}\n"
-                            f"💰 **Reward:** {reward} 🟡⭐\n"
-                            f"📊 **Type:** {t_type}\n"
-                            f"🔗 **Data:** {data}\n"
-                            f"⚡ **Status:** {status}\n\n"
-                            f"Choose what to edit:",
-                            reply_markup=markup,
-                            parse_mode="Markdown"
-                        )
-                        return True
-                        
-                    except ValueError:
-                        bot.send_message(chat_id, "❌ Please enter a valid Task ID (number).")
-                        return True
-                
-                elif stage == "delete_task_id":
-                    try:
-                        task_id = int(text)
-                        # Confirm deletion
-                        cursor.execute("SELECT task_name FROM tasks WHERE id=?", (task_id,))
-                        task = cursor.fetchone()
-                        
-                        if not task:
-                            bot.send_message(chat_id, "❌ Task not found! Please enter a valid Task ID.")
-                            return True
-                        
-                        task_name = task[0]
-                        
-                        markup = InlineKeyboardMarkup()
-                        markup.row(
-                            InlineKeyboardButton("✅ YES, DELETE", callback_data=f"confirm_delete_{task_id}"),
-                            InlineKeyboardButton("❌ NO, CANCEL", callback_data="admin_tasks")
-                        )
-                        
-                        bot.send_message(
-                            chat_id,
-                            f"⚠️ **Confirm Deletion**\n\n"
-                            f"Are you sure you want to delete task:\n"
-                            f"**#{task_id} - {task_name}**?\n\n"
-                            f"This action cannot be undone!",
-                            reply_markup=markup,
-                            parse_mode="Markdown"
-                        )
-                        
-                        # Clear session
-                        cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
-                        conn.commit()
-                        return True
-                        
-                    except ValueError:
-                        bot.send_message(chat_id, "❌ Please enter a valid Task ID (number).")
-                        return True
-            
-            except Exception as e:
-                print(f"❌ Error in admin session: {e}")
-    
-    # Check if this is for withdrawal amount
-    cursor.execute("""
-        SELECT action_type FROM user_actions 
-        WHERE user_id = ? AND action_type IN ('awaiting_stars_withdraw', 'awaiting_admin_withdraw')
-        ORDER BY action_time DESC LIMIT 1
-    """, (user_id,))
-    
-    result = cursor.fetchone()
-    if result:
-        action_type = result[0]
-        
-        try:
-            amount = int(text)
-            if amount < MIN_WITHDRAW:
-                bot.send_message(
-                    chat_id,
-                    f"❌ Minimum withdrawal is {MIN_WITHDRAW} 🟡⭐\nPlease try again:",
-                    parse_mode="Markdown"
-                )
-                return True
-            
-            user = get_wallet(user_id)
-            
-            if amount > user[1]:
-                bot.send_message(
-                    chat_id,
-                    "❌ Insufficient balance!\nPlease try again:",
-                    parse_mode="Markdown"
-                )
-                return True
-            
-            # Check daily limit for non-admins
-            if not is_admin(user_id):
-                if user[6] + amount > MAX_DAILY_WITHDRAW:
-                    remaining = MAX_DAILY_WITHDRAW - user[6]
-                    bot.send_message(
-                        chat_id,
-                        f"❌ Daily limit exceeded! You can withdraw {remaining} more today.\nPlease try again:",
-                        parse_mode="Markdown"
-                    )
-                    return True
-            
-            if action_type == "awaiting_stars_withdraw":
-                # Process stars withdrawal
-                cursor.execute("""
-                    INSERT INTO withdraw_requests (user_id, amount, withdrawal_type, status)
-                    VALUES (?, ?, 'stars', 'pending')
-                """, (user_id, amount))
-                conn.commit()
-                
-                # Update daily withdrawn for non-admins
-                if not is_admin(user_id):
-                    cursor.execute("""
-                        UPDATE users_wallet SET daily_withdrawn = daily_withdrawn + ? WHERE user_id = ?
-                    """, (amount, user_id))
-                    conn.commit()
-                
-                bot.send_message(
-                    chat_id,
-                    f"✅ **Withdrawal Requested!**\n\n"
-                    f"Amount: {amount} 🟡⭐\n"
-                    f"You'll receive: {amount} ⭐️ Telegram Stars\n\n"
-                    f"Your withdrawal will be processed within 5 minutes.",
-                    parse_mode="Markdown"
-                )
-                
-            else:  # admin withdrawal
-                cursor.execute("""
-                    INSERT INTO withdraw_requests (user_id, amount, withdrawal_type, status)
-                    VALUES (?, ?, 'admin', 'pending')
-                """, (user_id, amount))
-                conn.commit()
-                
-                # Update daily withdrawn for non-admins
-                if not is_admin(user_id):
-                    cursor.execute("""
-                        UPDATE users_wallet SET daily_withdrawn = daily_withdrawn + ? WHERE user_id = ?
-                    """, (amount, user_id))
-                    conn.commit()
-                
-                # Notify admins
-                user_name = get_user_display_name(user_id)
-                for admin_id in ADMIN_IDS:
-                    try:
-                        bot.send_message(
-                            admin_id,
-                            f"🔔 **New Admin Withdrawal Request**\n\n"
-                            f"👤 User: {user_name}\n"
-                            f"🆔 ID: `{user_id}`\n"
-                            f"💰 Amount: {amount} 🟡⭐\n\n"
-                            f"Use `/approve_withdraw {user_id} {amount}` to approve",
-                            parse_mode="Markdown"
-                        )
-                    except:
-                        pass
-                
-                bot.send_message(
-                    chat_id,
-                    f"✅ **Withdrawal Requested!**\n\n"
-                    f"Amount: {amount} 🟡⭐\n"
-                    f"Your request has been sent to admins for approval.\n"
-                    f"You'll be notified when it's processed.",
-                    parse_mode="Markdown"
-                )
-            
-            # Clear the waiting state
-            cursor.execute("DELETE FROM user_actions WHERE user_id=? AND action_type=?", (user_id, action_type))
-            conn.commit()
-            
-            # Trigger backup
-            if GITHUB_TOKEN and GITHUB_REPO:
-                threading.Thread(target=backup_to_github, args=("withdrawal_request", f"User {user_id} requested {amount} {action_type}"), daemon=True).start()
-            
-            return True
-            
-        except ValueError:
-            bot.send_message(
-                chat_id,
-                "❌ Please enter a valid number!",
-                parse_mode="Markdown"
-            )
-            return True
-    
-    return False
 
 # ================= ADMIN CALLBACKS FOR TASK CREATION =================
 
@@ -3967,6 +3311,13 @@ def refer(call):
         parse_mode="Markdown"
     )
 
+# ================= COPY LINK HANDLER =================
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("copy_"))
+def copy_link(call):
+    link = call.data.replace("copy_", "")
+    bot.answer_callback_query(call.id, f"Link copied! Share it with friends: {link}", show_alert=True)
+
 # ================= PREMIUM =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "premium")
@@ -4289,6 +3640,664 @@ def daily_admin_bonus():
             threading.Thread(target=backup_to_github, args=("admin_bonus", "Daily admin bonus added"), daemon=True).start()
 
 threading.Thread(target=daily_admin_bonus, daemon=True).start()
+
+# ================= HANDLE ALL TEXT MESSAGES =================
+
+@bot.message_handler(func=lambda message: True)
+def handle_all_messages(message):
+    """Handle all text messages including task creation, withdrawals, and redeem codes"""
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    text = message.text.strip()
+    
+    print(f"📨 Message from {user_id}: {text[:50]}...")  # Debug log
+    
+    # First, check if this is for redeem code
+    cursor.execute("""
+        SELECT action_type FROM user_actions 
+        WHERE user_id = ? AND action_type = 'awaiting_redeem_code'
+        ORDER BY action_time DESC LIMIT 1
+    """, (user_id,))
+    
+    redeem_session = cursor.fetchone()
+    if redeem_session:
+        # Process redeem code
+        success, result_message = redeem_code(user_id, text)
+        
+        # Clear the waiting state
+        cursor.execute("DELETE FROM user_actions WHERE user_id=? AND action_type=?", (user_id, "awaiting_redeem_code"))
+        conn.commit()
+        
+        if success:
+            # Get updated balance
+            user = get_wallet(user_id)
+            user_name = get_user_display_name(user_id)
+            
+            response = f"""
+━━━━━━━━━━━━━━━━━━━━━
+✅ **CODE REDEEMED!** ✅
+━━━━━━━━━━━━━━━━━━━━━
+
+👤 **{user_name}**
+
+{result_message}
+
+━━━━━━━━━━━━━━━━━━━━━
+💰 **New Balance:** {user[1]} 🟡⭐
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        else:
+            response = f"""
+━━━━━━━━━━━━━━━━━━━━━
+❌ **REDEMPTION FAILED** ❌
+━━━━━━━━━━━━━━━━━━━━━
+
+{result_message}
+
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        
+        # Check if user is admin to show admin panel option
+        markup = main_menu()
+        if is_admin(user_id):
+            admin_markup = InlineKeyboardMarkup()
+            admin_markup.row(
+                InlineKeyboardButton("💼✨ EARN STARS 💼✨", callback_data="earn"),
+                InlineKeyboardButton("📋✅ TASKS 📋✅", callback_data="show_tasks")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("📨🔥 REFER & EARN 📨🔥", callback_data="refer"),
+                InlineKeyboardButton("👤🌈 PROFILE 👤🌈", callback_data="profile")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("🏆🎖 LEADERBOARD 🏆🎖", callback_data="leaderboard"),
+                InlineKeyboardButton("💎🚀 PREMIUM 💎🚀", callback_data="premium")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("🟡💰 BUY STARS 🟡💰", callback_data="buy_menu"),
+                InlineKeyboardButton("💳🏦 WITHDRAW 💳🏦", callback_data="withdraw_menu")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("🎫 REDEEM CODE 🎫", callback_data="redeem_menu")
+            )
+            admin_markup.row(
+                InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+            )
+            markup = admin_markup
+        
+        bot.send_message(
+            chat_id,
+            response,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+        return True
+    
+    # Then check if this is for admin task creation
+    if is_admin(user_id):
+        # Check for active admin session
+        cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,))
+        session = cursor.fetchone()
+        
+        if session:
+            import ast
+            try:
+                session_data = ast.literal_eval(session[0])
+                stage = session_data.get("stage")
+                
+                # Handle code amount input
+                if stage == "code_amount":
+                    try:
+                        amount = int(text)
+                        if amount <= 0:
+                            bot.send_message(chat_id, "❌ Amount must be a positive number! Please try again:")
+                            return True
+                        
+                        session_data["data"]["amount"] = amount
+                        session_data["stage"] = "code_expiry"
+                        
+                        cursor.execute("""
+                            UPDATE admin_sessions SET session_data=?, updated_at=? WHERE admin_id=?
+                        """, (str(session_data), datetime.now(), user_id))
+                        conn.commit()
+                        
+                        bot.send_message(
+                            chat_id,
+                            f"✅ Amount set to: **{amount}** 🟡⭐\n\n"
+                            "📅 **Step 2/3: Code Expiry**\n"
+                            "Please enter the number of days this code should be valid:\n\n"
+                            "💡 Example: 30 (for 30 days)\n"
+                            "💡 Enter 0 for no expiry",
+                            parse_mode="Markdown"
+                        )
+                        return True
+                        
+                    except ValueError:
+                        bot.send_message(chat_id, "❌ Please enter a valid number for the amount!")
+                        return True
+                
+                # Handle code expiry input
+                elif stage == "code_expiry":
+                    try:
+                        days = int(text)
+                        session_data["data"]["expiry_days"] = days
+                        session_data["stage"] = "code_uses"
+                        
+                        cursor.execute("""
+                            UPDATE admin_sessions SET session_data=?, updated_at=? WHERE admin_id=?
+                        """, (str(session_data), datetime.now(), user_id))
+                        conn.commit()
+                        
+                        bot.send_message(
+                            chat_id,
+                            "🔄 **Step 3/3: Maximum Uses**\n\n"
+                            "Please enter the maximum number of times this code can be used:\n\n"
+                            "💡 Example: 1 (single use)\n"
+                            "💡 Example: 10 (multiple uses)\n"
+                            "💡 Enter 0 for unlimited",
+                            parse_mode="Markdown"
+                        )
+                        return True
+                        
+                    except ValueError:
+                        bot.send_message(chat_id, "❌ Please enter a valid number for days!")
+                        return True
+                
+                # Handle code uses input and create code
+                elif stage == "code_uses":
+                    try:
+                        max_uses = int(text)
+                        if max_uses <= 0:
+                            max_uses = 999999  # Unlimited
+                        
+                        amount = session_data["data"]["amount"]
+                        expiry_days = session_data["data"]["expiry_days"]
+                        
+                        # Create the code
+                        code = create_redeem_code(user_id, amount, expiry_days, max_uses)
+                        
+                        # Clear session
+                        cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
+                        conn.commit()
+                        
+                        # Trigger backup
+                        if GITHUB_TOKEN and GITHUB_REPO:
+                            threading.Thread(target=backup_to_github, args=("new_code", f"Admin created code for {amount} stars"), daemon=True).start()
+                        
+                        response = f"""
+━━━━━━━━━━━━━━━━━━━━━
+✅ **CODE CREATED SUCCESSFULLY!** ✅
+━━━━━━━━━━━━━━━━━━━━━
+
+🎫 **Code:** `{code}`
+
+💰 **Amount:** {amount} 🟡⭐
+📅 **Expires:** {expiry_days if expiry_days > 0 else 'Never'} days
+🔄 **Max Uses:** {'Unlimited' if max_uses > 1000 else max_uses}
+
+━━━━━━━━━━━━━━━━━━━━━
+📤 Share this code with users!
+━━━━━━━━━━━━━━━━━━━━━
+"""
+                        
+                        bot.send_message(chat_id, response, parse_mode="Markdown")
+                        
+                        # Show admin panel
+                        admin_panel_callback = type('obj', (object,), {
+                            'message': type('obj', (object,), {
+                                'chat': {'id': chat_id},
+                                'message_id': None
+                            })
+                        })
+                        admin_panel_callback.message.chat.id = chat_id
+                        admin_panel_callback.message.message_id = None
+                        admin_panel(admin_panel_callback)
+                        return True
+                        
+                    except ValueError:
+                        bot.send_message(chat_id, "❌ Please enter a valid number for max uses!")
+                        return True
+                
+                # Handle deactivate code
+                elif stage == "deactivate_code":
+                    try:
+                        code_id = int(text)
+                        if deactivate_redeem_code(code_id):
+                            bot.send_message(chat_id, f"✅ Code #{code_id} has been deactivated!")
+                        else:
+                            bot.send_message(chat_id, f"❌ Code #{code_id} not found!")
+                        
+                        # Clear session
+                        cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
+                        conn.commit()
+                        
+                        # Show codes list
+                        admin_list_codes_callback = type('obj', (object,), {
+                            'message': type('obj', (object,), {
+                                'chat': {'id': chat_id},
+                                'message_id': None
+                            })
+                        })
+                        admin_list_codes_callback.message.chat.id = chat_id
+                        admin_list_codes_callback.message.message_id = None
+                        admin_list_codes(admin_list_codes_callback)
+                        return True
+                        
+                    except ValueError:
+                        bot.send_message(chat_id, "❌ Please enter a valid Code ID!")
+                        return True
+                
+                # Handle task name input
+                elif stage == "task_name":
+                    # Store task name
+                    session_data["data"]["name"] = text
+                    session_data["stage"] = "task_type"
+                    
+                    cursor.execute("""
+                        UPDATE admin_sessions SET session_data=?, updated_at=? WHERE admin_id=?
+                    """, (str(session_data), datetime.now(), user_id))
+                    conn.commit()
+                    
+                    markup = InlineKeyboardMarkup()
+                    markup.row(
+                        InlineKeyboardButton("📢 JOIN CHANNEL", callback_data="admin_task_type_join_channel"),
+                        InlineKeyboardButton("👥 JOIN GROUP", callback_data="admin_task_type_join_group")
+                    )
+                    markup.row(
+                        InlineKeyboardButton("🔗 VISIT LINK", callback_data="admin_task_type_visit_link"),
+                        InlineKeyboardButton("🎥 WATCH VIDEO", callback_data="admin_task_type_watch_video")
+                    )
+                    markup.row(
+                        InlineKeyboardButton("❌ CANCEL ❌", callback_data="admin_tasks")
+                    )
+                    
+                    bot.send_message(
+                        chat_id,
+                        f"✅ Task name set to: **{text}**\n\n"
+                        "📝 **Step 2/4: Task Type**\n"
+                        "Please choose the task type:",
+                        reply_markup=markup,
+                        parse_mode="Markdown"
+                    )
+                    return True
+                
+                # Handle task data input (links, channel names, etc.)
+                elif stage == "task_data":
+                    # Store task data
+                    task_type = session_data["data"].get("type")
+                    session_data["data"]["data"] = text
+                    session_data["stage"] = "task_reward"
+                    
+                    cursor.execute("""
+                        UPDATE admin_sessions SET session_data=?, updated_at=? WHERE admin_id=?
+                    """, (str(session_data), datetime.now(), user_id))
+                    conn.commit()
+                    
+                    bot.send_message(
+                        chat_id,
+                        f"✅ Task data saved!\n\n"
+                        "💰 **Step 3/4: Task Reward**\n"
+                        "Please enter the reward amount (in 🟡⭐):\n\n"
+                        "💡 Example: 50",
+                        parse_mode="Markdown"
+                    )
+                    return True
+                
+                # Handle task reward input
+                elif stage == "task_reward":
+                    try:
+                        reward = int(text)
+                        if reward <= 0:
+                            bot.send_message(chat_id, "❌ Reward must be a positive number! Please try again:")
+                            return True
+                        
+                        session_data["data"]["reward"] = reward
+                        
+                        # Save the complete task
+                        task_name = session_data["data"]["name"]
+                        task_type = session_data["data"]["type"]
+                        task_data = session_data["data"]["data"]
+                        created_by = user_id
+                        
+                        cursor.execute("""
+                            INSERT INTO tasks (task_name, task_type, task_data, reward, created_by)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (task_name, task_type, task_data, reward, created_by))
+                        conn.commit()
+                        
+                        # Clear session
+                        cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
+                        conn.commit()
+                        
+                        # Trigger backup
+                        if GITHUB_TOKEN and GITHUB_REPO:
+                            threading.Thread(target=backup_to_github, args=("new_task", f"Admin created task: {task_name}"), daemon=True).start()
+                        
+                        bot.send_message(
+                            chat_id,
+                            f"✅ **Task Created Successfully!**\n\n"
+                            f"📝 **Name:** {task_name}\n"
+                            f"💰 **Reward:** {reward} 🟡⭐\n"
+                            f"📊 **Type:** {task_type}\n"
+                            f"🔗 **Data:** {task_data}\n\n"
+                            f"The task is now available for users!",
+                            parse_mode="Markdown"
+                        )
+                        
+                        # Show admin panel
+                        admin_panel_callback = type('obj', (object,), {
+                            'message': type('obj', (object,), {
+                                'chat': {'id': chat_id},
+                                'message_id': None
+                            })
+                        })
+                        admin_panel_callback.message.chat.id = chat_id
+                        admin_panel_callback.message.message_id = None
+                        admin_panel(admin_panel_callback)
+                        
+                        return True
+                        
+                    except ValueError:
+                        bot.send_message(chat_id, "❌ Please enter a valid number for the reward!")
+                        return True
+                
+                # Handle edit field inputs
+                elif stage == "edit_name":
+                    task_id = session_data["data"]["edit_task_id"]
+                    cursor.execute("UPDATE tasks SET task_name=? WHERE id=?", (text, task_id))
+                    conn.commit()
+                    
+                    bot.send_message(chat_id, f"✅ Task name updated to: **{text}**", parse_mode="Markdown")
+                    
+                    # Clear session
+                    cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
+                    conn.commit()
+                    
+                    # Show updated task list
+                    admin_tasks_callback = type('obj', (object,), {
+                        'message': type('obj', (object,), {
+                            'chat': {'id': chat_id},
+                            'message_id': None
+                        })
+                    })
+                    admin_tasks_callback.message.chat.id = chat_id
+                    admin_tasks_callback.message.message_id = None
+                    admin_tasks(admin_tasks_callback)
+                    return True
+                
+                elif stage == "edit_reward":
+                    try:
+                        reward = int(text)
+                        task_id = session_data["data"]["edit_task_id"]
+                        cursor.execute("UPDATE tasks SET reward=? WHERE id=?", (reward, task_id))
+                        conn.commit()
+                        
+                        bot.send_message(chat_id, f"✅ Task reward updated to: **{reward}** 🟡⭐", parse_mode="Markdown")
+                        
+                        # Clear session
+                        cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
+                        conn.commit()
+                        
+                        # Show updated task list
+                        admin_tasks_callback = type('obj', (object,), {
+                            'message': type('obj', (object,), {
+                                'chat': {'id': chat_id},
+                                'message_id': None
+                            })
+                        })
+                        admin_tasks_callback.message.chat.id = chat_id
+                        admin_tasks_callback.message.message_id = None
+                        admin_tasks(admin_tasks_callback)
+                        return True
+                        
+                    except ValueError:
+                        bot.send_message(chat_id, "❌ Please enter a valid number for the reward!")
+                        return True
+                
+                elif stage == "edit_data":
+                    task_id = session_data["data"]["edit_task_id"]
+                    cursor.execute("UPDATE tasks SET task_data=? WHERE id=?", (text, task_id))
+                    conn.commit()
+                    
+                    bot.send_message(chat_id, f"✅ Task data updated to: **{text}**", parse_mode="Markdown")
+                    
+                    # Clear session
+                    cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
+                    conn.commit()
+                    
+                    # Show updated task list
+                    admin_tasks_callback = type('obj', (object,), {
+                        'message': type('obj', (object,), {
+                            'chat': {'id': chat_id},
+                            'message_id': None
+                        })
+                    })
+                    admin_tasks_callback.message.chat.id = chat_id
+                    admin_tasks_callback.message.message_id = None
+                    admin_tasks(admin_tasks_callback)
+                    return True
+                
+                elif stage == "edit_task_id":
+                    try:
+                        task_id = int(text)
+                        # Check if task exists
+                        cursor.execute("SELECT * FROM tasks WHERE id=?", (task_id,))
+                        task = cursor.fetchone()
+                        
+                        if not task:
+                            bot.send_message(chat_id, "❌ Task not found! Please enter a valid Task ID.")
+                            return True
+                        
+                        session_data["data"]["edit_task_id"] = task_id
+                        session_data["stage"] = "edit_field"
+                        
+                        cursor.execute("""
+                            UPDATE admin_sessions SET session_data=?, updated_at=? WHERE admin_id=?
+                        """, (str(session_data), datetime.now(), user_id))
+                        conn.commit()
+                        
+                        task_id, name, t_type, data, reward, max_comp, completed, active, created_by, created = task
+                        
+                        markup = InlineKeyboardMarkup()
+                        markup.row(
+                            InlineKeyboardButton("📝 NAME", callback_data="edit_name"),
+                            InlineKeyboardButton("💰 REWARD", callback_data="edit_reward")
+                        )
+                        markup.row(
+                            InlineKeyboardButton("📊 TYPE", callback_data="edit_type"),
+                            InlineKeyboardButton("🔗 DATA", callback_data="edit_data")
+                        )
+                        markup.row(
+                            InlineKeyboardButton("⚡ ACTIVE", callback_data="edit_active"),
+                            InlineKeyboardButton("❌ CANCEL", callback_data="admin_tasks")
+                        )
+                        
+                        status = "✅ ACTIVE" if active else "❌ INACTIVE"
+                        bot.send_message(
+                            chat_id,
+                            f"📋 **Editing Task #{task_id}**\n\n"
+                            f"📝 **Name:** {name}\n"
+                            f"💰 **Reward:** {reward} 🟡⭐\n"
+                            f"📊 **Type:** {t_type}\n"
+                            f"🔗 **Data:** {data}\n"
+                            f"⚡ **Status:** {status}\n\n"
+                            f"Choose what to edit:",
+                            reply_markup=markup,
+                            parse_mode="Markdown"
+                        )
+                        return True
+                        
+                    except ValueError:
+                        bot.send_message(chat_id, "❌ Please enter a valid Task ID (number).")
+                        return True
+                
+                elif stage == "delete_task_id":
+                    try:
+                        task_id = int(text)
+                        # Confirm deletion
+                        cursor.execute("SELECT task_name FROM tasks WHERE id=?", (task_id,))
+                        task = cursor.fetchone()
+                        
+                        if not task:
+                            bot.send_message(chat_id, "❌ Task not found! Please enter a valid Task ID.")
+                            return True
+                        
+                        task_name = task[0]
+                        
+                        markup = InlineKeyboardMarkup()
+                        markup.row(
+                            InlineKeyboardButton("✅ YES, DELETE", callback_data=f"confirm_delete_{task_id}"),
+                            InlineKeyboardButton("❌ NO, CANCEL", callback_data="admin_tasks")
+                        )
+                        
+                        bot.send_message(
+                            chat_id,
+                            f"⚠️ **Confirm Deletion**\n\n"
+                            f"Are you sure you want to delete task:\n"
+                            f"**#{task_id} - {task_name}**?\n\n"
+                            f"This action cannot be undone!",
+                            reply_markup=markup,
+                            parse_mode="Markdown"
+                        )
+                        
+                        # Clear session
+                        cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
+                        conn.commit()
+                        return True
+                        
+                    except ValueError:
+                        bot.send_message(chat_id, "❌ Please enter a valid Task ID (number).")
+                        return True
+            
+            except Exception as e:
+                print(f"❌ Error in admin session: {e}")
+                import traceback
+                traceback.print_exc()
+    
+    # Check if this is for withdrawal amount
+    cursor.execute("""
+        SELECT action_type FROM user_actions 
+        WHERE user_id = ? AND action_type IN ('awaiting_stars_withdraw', 'awaiting_admin_withdraw')
+        ORDER BY action_time DESC LIMIT 1
+    """, (user_id,))
+    
+    result = cursor.fetchone()
+    if result:
+        action_type = result[0]
+        
+        try:
+            amount = int(text)
+            if amount < MIN_WITHDRAW:
+                bot.send_message(
+                    chat_id,
+                    f"❌ Minimum withdrawal is {MIN_WITHDRAW} 🟡⭐\nPlease try again:",
+                    parse_mode="Markdown"
+                )
+                return True
+            
+            user = get_wallet(user_id)
+            
+            if amount > user[1]:
+                bot.send_message(
+                    chat_id,
+                    "❌ Insufficient balance!\nPlease try again:",
+                    parse_mode="Markdown"
+                )
+                return True
+            
+            # Check daily limit for non-admins
+            if not is_admin(user_id):
+                if user[6] + amount > MAX_DAILY_WITHDRAW:
+                    remaining = MAX_DAILY_WITHDRAW - user[6]
+                    bot.send_message(
+                        chat_id,
+                        f"❌ Daily limit exceeded! You can withdraw {remaining} more today.\nPlease try again:",
+                        parse_mode="Markdown"
+                    )
+                    return True
+            
+            if action_type == "awaiting_stars_withdraw":
+                # Process stars withdrawal
+                cursor.execute("""
+                    INSERT INTO withdraw_requests (user_id, amount, withdrawal_type, status)
+                    VALUES (?, ?, 'stars', 'pending')
+                """, (user_id, amount))
+                conn.commit()
+                
+                # Update daily withdrawn for non-admins
+                if not is_admin(user_id):
+                    cursor.execute("""
+                        UPDATE users_wallet SET daily_withdrawn = daily_withdrawn + ? WHERE user_id = ?
+                    """, (amount, user_id))
+                    conn.commit()
+                
+                bot.send_message(
+                    chat_id,
+                    f"✅ **Withdrawal Requested!**\n\n"
+                    f"Amount: {amount} 🟡⭐\n"
+                    f"You'll receive: {amount} ⭐️ Telegram Stars\n\n"
+                    f"Your withdrawal will be processed within 5 minutes.",
+                    parse_mode="Markdown"
+                )
+                
+            else:  # admin withdrawal
+                cursor.execute("""
+                    INSERT INTO withdraw_requests (user_id, amount, withdrawal_type, status)
+                    VALUES (?, ?, 'admin', 'pending')
+                """, (user_id, amount))
+                conn.commit()
+                
+                # Update daily withdrawn for non-admins
+                if not is_admin(user_id):
+                    cursor.execute("""
+                        UPDATE users_wallet SET daily_withdrawn = daily_withdrawn + ? WHERE user_id = ?
+                    """, (amount, user_id))
+                    conn.commit()
+                
+                # Notify admins
+                user_name = get_user_display_name(user_id)
+                for admin_id in ADMIN_IDS:
+                    try:
+                        bot.send_message(
+                            admin_id,
+                            f"🔔 **New Admin Withdrawal Request**\n\n"
+                            f"👤 User: {user_name}\n"
+                            f"🆔 ID: `{user_id}`\n"
+                            f"💰 Amount: {amount} 🟡⭐\n\n"
+                            f"Use `/approve_withdraw {user_id} {amount}` to approve",
+                            parse_mode="Markdown"
+                        )
+                    except:
+                        pass
+                
+                bot.send_message(
+                    chat_id,
+                    f"✅ **Withdrawal Requested!**\n\n"
+                    f"Amount: {amount} 🟡⭐\n"
+                    f"Your request has been sent to admins for approval.\n"
+                    f"You'll be notified when it's processed.",
+                    parse_mode="Markdown"
+                )
+            
+            # Clear the waiting state
+            cursor.execute("DELETE FROM user_actions WHERE user_id=? AND action_type=?", (user_id, action_type))
+            conn.commit()
+            
+            # Trigger backup
+            if GITHUB_TOKEN and GITHUB_REPO:
+                threading.Thread(target=backup_to_github, args=("withdrawal_request", f"User {user_id} requested {amount} {action_type}"), daemon=True).start()
+            
+            return True
+            
+        except ValueError:
+            bot.send_message(
+                chat_id,
+                "❌ Please enter a valid number!",
+                parse_mode="Markdown"
+            )
+            return True
+    
+    return False
 
 # ================= WEBHOOK SETUP =================
 
