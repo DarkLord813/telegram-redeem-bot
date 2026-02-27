@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS withdraw_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
     amount INTEGER,
-    withdrawal_type TEXT DEFAULT 'admin',  -- 'admin', 'stars'
+    withdrawal_type TEXT DEFAULT 'admin',
     status TEXT DEFAULT 'pending',
     request_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     processed_time TIMESTAMP DEFAULT NULL,
@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS payments (
 )
 """)
 
-# Add new tables for task system
+# Task system tables
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     task_data TEXT,
     reward INTEGER,
     max_completions INTEGER DEFAULT -1,
+    completed_count INTEGER DEFAULT 0,
     active INTEGER DEFAULT 1,
     created_by INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -126,7 +127,16 @@ CREATE TABLE IF NOT EXISTS user_tasks (
 )
 """)
 
-# Add backup log table
+# Admin sessions table
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    admin_id INTEGER PRIMARY KEY,
+    session_data TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+# Backup log table
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS backup_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -292,6 +302,10 @@ def add_stars(user_id, amount, trigger_backup=True):
         SET stars = stars + ?, total_earned = total_earned + ?
         WHERE user_id=?
     """, (amount, amount, user_id))
+    conn.commit()
+    
+    # Update tasks_done count
+    cursor.execute("UPDATE users_wallet SET tasks_done = tasks_done + 1 WHERE user_id=?", (user_id,))
     conn.commit()
     
     # Trigger backup on significant earnings (every 100 stars)
@@ -582,10 +596,37 @@ def start_handler(message):
 
 👇 **Choose an option below:** 👇
 """
+    
+    # Check if user is admin to show admin panel option
+    markup = main_menu()
+    if is_admin(user_id):
+        # Add admin panel button to menu
+        admin_markup = InlineKeyboardMarkup()
+        admin_markup.row(
+            InlineKeyboardButton("💼✨ EARN STARS 💼✨", callback_data="earn"),
+            InlineKeyboardButton("📋✅ TASKS 📋✅", callback_data="show_tasks")
+        )
+        admin_markup.row(
+            InlineKeyboardButton("📨🔥 REFER & EARN 📨🔥", callback_data="refer"),
+            InlineKeyboardButton("👤🌈 PROFILE 👤🌈", callback_data="profile")
+        )
+        admin_markup.row(
+            InlineKeyboardButton("🏆🎖 LEADERBOARD 🏆🎖", callback_data="leaderboard"),
+            InlineKeyboardButton("💎🚀 PREMIUM 💎🚀", callback_data="premium")
+        )
+        admin_markup.row(
+            InlineKeyboardButton("🟡💰 BUY STARS 🟡💰", callback_data="buy_menu"),
+            InlineKeyboardButton("💳🏦 WITHDRAW 💳🏦", callback_data="withdraw_menu")
+        )
+        admin_markup.row(
+            InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+        )
+        markup = admin_markup
+    
     bot.send_message(
         user_id,
         welcome_text,
-        reply_markup=main_menu(),
+        reply_markup=markup,
         parse_mode="Markdown"
     )
 
@@ -614,9 +655,13 @@ def earn(call):
     
     cursor.execute("""
         UPDATE users_wallet 
-        SET stars = stars + ?, total_earned = total_earned + ?, tasks_done = tasks_done + 1
+        SET stars = stars + ?, total_earned = total_earned + ?
         WHERE user_id=?
     """, (reward, reward, user_id))
+    conn.commit()
+    
+    # Update tasks_done
+    cursor.execute("UPDATE users_wallet SET tasks_done = tasks_done + 1 WHERE user_id=?", (user_id,))
     conn.commit()
     
     log_action(user_id, "earn")
@@ -644,11 +689,36 @@ def earn(call):
 💡 _Keep earning to reach the top!_
 """
     
+    # Check if user is admin to show admin panel option
+    markup = main_menu()
+    if is_admin(user_id):
+        admin_markup = InlineKeyboardMarkup()
+        admin_markup.row(
+            InlineKeyboardButton("💼✨ EARN STARS 💼✨", callback_data="earn"),
+            InlineKeyboardButton("📋✅ TASKS 📋✅", callback_data="show_tasks")
+        )
+        admin_markup.row(
+            InlineKeyboardButton("📨🔥 REFER & EARN 📨🔥", callback_data="refer"),
+            InlineKeyboardButton("👤🌈 PROFILE 👤🌈", callback_data="profile")
+        )
+        admin_markup.row(
+            InlineKeyboardButton("🏆🎖 LEADERBOARD 🏆🎖", callback_data="leaderboard"),
+            InlineKeyboardButton("💎🚀 PREMIUM 💎🚀", callback_data="premium")
+        )
+        admin_markup.row(
+            InlineKeyboardButton("🟡💰 BUY STARS 🟡💰", callback_data="buy_menu"),
+            InlineKeyboardButton("💳🏦 WITHDRAW 💳🏦", callback_data="withdraw_menu")
+        )
+        admin_markup.row(
+            InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+        )
+        markup = admin_markup
+    
     bot.edit_message_text(
         text,
         call.message.chat.id,
         call.message.message_id,
-        reply_markup=main_menu(),
+        reply_markup=markup,
         parse_mode="Markdown"
     )
 
@@ -660,19 +730,22 @@ def profile(call):
     user = get_wallet(user_id)
     user_name = get_user_display_name(user_id)
     
-    # Get rank
-    cursor.execute("""
+    # Get rank (excluding admins)
+    placeholders = ','.join('?' * len(ADMIN_IDS))
+    cursor.execute(f"""
         SELECT COUNT(*) + 1 FROM users_wallet 
         WHERE stars > (SELECT stars FROM users_wallet WHERE user_id = ?)
-    """, (user_id,))
+        AND user_id NOT IN ({placeholders})
+    """, (user_id, *ADMIN_IDS))
     rank = cursor.fetchone()[0]
     
-    # Calculate progress to next rank
-    cursor.execute("""
+    # Calculate progress to next rank (excluding admins)
+    cursor.execute(f"""
         SELECT stars FROM users_wallet 
         WHERE stars > (SELECT stars FROM users_wallet WHERE user_id = ?)
+        AND user_id NOT IN ({placeholders})
         ORDER BY stars ASC LIMIT 1
-    """, (user_id,))
+    """, (user_id, *ADMIN_IDS))
     next_rank = cursor.fetchone()
     
     if next_rank:
@@ -732,6 +805,13 @@ def profile(call):
         InlineKeyboardButton("👥 REFERRALS 👥", callback_data="refer"),
         InlineKeyboardButton("🏆 LEADERBOARD 🏆", callback_data="leaderboard")
     )
+    
+    # Add admin panel button for admins
+    if is_admin(user_id):
+        markup.row(
+            InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+        )
+    
     markup.row(
         InlineKeyboardButton("🔙 BACK TO MENU 🔙", callback_data="back")
     )
@@ -744,17 +824,20 @@ def profile(call):
         parse_mode="Markdown"
     )
 
-# ================= LEADERBOARD WITH NAMES =================
+# ================= LEADERBOARD WITH NAMES (ADMINS REMOVED) =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "leaderboard")
 def leaderboard(call):
-    # Get top 10 users by stars
-    cursor.execute("""
+    user_id = call.from_user.id
+    # Get top 10 users by stars (excluding admins)
+    placeholders = ','.join('?' * len(ADMIN_IDS))
+    cursor.execute(f"""
         SELECT user_id, stars, total_earned, referrals 
         FROM users_wallet 
+        WHERE user_id NOT IN ({placeholders})
         ORDER BY stars DESC 
         LIMIT 10
-    """)
+    """, ADMIN_IDS)
     top_users = cursor.fetchall()
     
     # Create colorful leaderboard text
@@ -768,60 +851,55 @@ def leaderboard(call):
     # Medal emojis for top 3
     medals = ["🥇 **GOLD**", "🥈 **SILVER**", "🥉 **BRONZE**"]
     
-    # Add admin section (always on top)
-    if ADMIN_IDS:
-        text += "👑 **━━━━ ADMIN ZONE ━━━━** 👑\n"
-        for admin_id in ADMIN_IDS:
-            admin_name = get_user_display_name(admin_id)
-            text += f"👑 **{admin_name}**\n"
-            text += "└ ∞ 🟡⭐ (Unlimited)\n\n"
-        text += "━━━━━━━━━━━━━━━━━━━━━\n"
-    
     text += "🌟 **TOP EARNERS** 🌟\n"
     text += "━━━━━━━━━━━━━━━━━━━━━\n\n"
     
-    # Process top users
-    rank = 1
-    for user_id, stars, total_earned, referrals in top_users:
-        if user_id in ADMIN_IDS:
-            continue  # Skip admins (already shown)
-        
-        user_name = get_user_display_name(user_id)
-        
-        # Choose medal or number
-        if rank <= 3:
-            rank_display = medals[rank-1]
-        else:
-            rank_display = f"**#{rank}**"
-        
-        # Colorful progress bar based on stars
-        progress_length = min(stars // 10, 10)
-        progress_bar = "🟩" * progress_length + "⬜" * (10 - progress_length)
-        
-        # Format stars with commas
-        stars_formatted = f"{stars:,}"
-        
-        text += f"{rank_display} **{user_name}**\n"
-        text += f"├ 💰 Stars: **{stars_formatted}** 🟡\n"
-        text += f"├ 📊 {progress_bar}\n"
-        text += f"└ 👥 Referrals: **{referrals}**\n\n"
-        
-        rank += 1
-        if rank > 10:
-            break
+    if not top_users:
+        text += "No users yet! Be the first to earn stars!\n\n"
+    else:
+        # Process top users
+        rank = 1
+        for user_id_top, stars, total_earned, referrals in top_users:
+            user_name = get_user_display_name(user_id_top)
+            
+            # Choose medal or number
+            if rank <= 3:
+                rank_display = medals[rank-1]
+            else:
+                rank_display = f"**#{rank}**"
+            
+            # Colorful progress bar based on stars
+            progress_length = min(stars // 10, 10)
+            progress_bar = "🟩" * progress_length + "⬜" * (10 - progress_length)
+            
+            # Format stars with commas
+            stars_formatted = f"{stars:,}"
+            
+            text += f"{rank_display} **{user_name}**\n"
+            text += f"├ 💰 Stars: **{stars_formatted}** 🟡\n"
+            text += f"├ 📊 {progress_bar}\n"
+            text += f"└ 👥 Referrals: **{referrals}**\n\n"
+            
+            rank += 1
+            if rank > 10:
+                break
     
-    # Add total stats
-    cursor.execute("SELECT COUNT(*) FROM users_wallet")
+    # Add total stats (excluding admins)
+    cursor.execute(f"SELECT COUNT(*) FROM users_wallet WHERE user_id NOT IN ({placeholders})", ADMIN_IDS)
     total_users = cursor.fetchone()[0]
     
-    cursor.execute("SELECT SUM(stars) FROM users_wallet")
+    cursor.execute(f"SELECT SUM(stars) FROM users_wallet WHERE user_id NOT IN ({placeholders})", ADMIN_IDS)
     total_stars = cursor.fetchone()[0] or 0
+    
+    cursor.execute(f"SELECT AVG(stars) FROM users_wallet WHERE user_id NOT IN ({placeholders})", ADMIN_IDS)
+    avg_stars = int(cursor.fetchone()[0] or 0)
     
     text += "━━━━━━━━━━━━━━━━━━━━━\n"
     text += "📊 **STATISTICS** 📊\n"
     text += "━━━━━━━━━━━━━━━━━━━━━\n"
     text += f"👥 **Total Users:** `{total_users:,}`\n"
     text += f"💰 **Total Stars:** `{total_stars:,}` 🟡\n"
+    text += f"📈 **Average Stars:** `{avg_stars:,}` 🟡\n"
     text += "━━━━━━━━━━━━━━━━━━━━━\n\n"
     text += "💡 _Keep earning to reach the top!_"
     
@@ -835,6 +913,13 @@ def leaderboard(call):
         InlineKeyboardButton("💰 EARN STARS 💰", callback_data="earn"),
         InlineKeyboardButton("👥 REFER 👥", callback_data="refer")
     )
+    
+    # Add admin panel button for admins
+    if is_admin(user_id):
+        markup.row(
+            InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+        )
+    
     markup.row(
         InlineKeyboardButton("🔙 BACK TO MENU 🔙", callback_data="back")
     )
@@ -846,6 +931,1389 @@ def leaderboard(call):
         reply_markup=markup,
         parse_mode="Markdown"
     )
+
+# ================= ADMIN PANEL =================
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_panel")
+def admin_panel(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "❌ Access denied! Admins only.", show_alert=True)
+        return
+    
+    # Get stats
+    placeholders = ','.join('?' * len(ADMIN_IDS))
+    cursor.execute(f"SELECT COUNT(*) FROM users_wallet WHERE user_id NOT IN ({placeholders})", ADMIN_IDS)
+    total_users = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM tasks WHERE active=1")
+    active_tasks = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM withdraw_requests WHERE status='pending'")
+    pending_withdrawals = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM user_tasks WHERE verified=0")
+    pending_verifications = cursor.fetchone()[0]
+    
+    cursor.execute(f"SELECT SUM(stars) FROM users_wallet WHERE user_id NOT IN ({placeholders})", ADMIN_IDS)
+    total_stars = cursor.fetchone()[0] or 0
+    
+    text = f"""
+━━━━━━━━━━━━━━━━━━━━━
+👑 **ADMIN PANEL** 👑
+━━━━━━━━━━━━━━━━━━━━━
+
+📊 **BOT STATISTICS**
+━━━━━━━━━━━━━━━━━━━━━
+👥 **Total Users:** {total_users}
+💰 **Total Stars:** {total_stars:,} 🟡
+📋 **Active Tasks:** {active_tasks}
+⏳ **Pending Withdrawals:** {pending_withdrawals}
+🔍 **Pending Verifications:** {pending_verifications}
+
+━━━━━━━━━━━━━━━━━━━━━
+🛠️ **ADMIN TOOLS**
+━━━━━━━━━━━━━━━━━━━━━
+
+👇 **Choose an option:**
+"""
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("📋 MANAGE TASKS 📋", callback_data="admin_tasks"),
+        InlineKeyboardButton("💳 WITHDRAWALS 💳", callback_data="admin_withdrawals")
+    )
+    markup.row(
+        InlineKeyboardButton("🔍 VERIFICATIONS 🔍", callback_data="admin_verifications"),
+        InlineKeyboardButton("📊 STATISTICS 📊", callback_data="admin_stats")
+    )
+    markup.row(
+        InlineKeyboardButton("➕ ADD TASK ➕", callback_data="admin_add_task"),
+        InlineKeyboardButton("💾 BACKUP 💾", callback_data="admin_backup")
+    )
+    markup.row(
+        InlineKeyboardButton("🔙 BACK TO MENU 🔙", callback_data="back")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+# ================= ADMIN TASK MANAGEMENT =================
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_tasks")
+def admin_tasks(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    cursor.execute("SELECT * FROM tasks ORDER BY created_at DESC LIMIT 10")
+    tasks = cursor.fetchall()
+    
+    if not tasks:
+        text = """
+━━━━━━━━━━━━━━━━━━━━━
+📋 **TASK MANAGEMENT** 📋
+━━━━━━━━━━━━━━━━━━━━━
+
+❌ No tasks found in database.
+
+➕ Use 'ADD TASK' to create your first task!
+━━━━━━━━━━━━━━━━━━━━━
+"""
+    else:
+        text = """
+━━━━━━━━━━━━━━━━━━━━━
+📋 **TASK MANAGEMENT** 📋
+━━━━━━━━━━━━━━━━━━━━━
+
+📌 **Recent Tasks:**
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        for task in tasks:
+            task_id, name, task_type, data, reward, max_comp, completed, active, created_by, created = task
+            status = "✅ ACTIVE" if active else "❌ INACTIVE"
+            text += f"\n🆔 **ID:** {task_id}\n"
+            text += f"📝 **Name:** {name}\n"
+            text += f"💰 **Reward:** {reward} 🟡⭐\n"
+            text += f"📊 **Type:** {task_type}\n"
+            text += f"📈 **Completed:** {completed}\n"
+            text += f"⚡ **Status:** {status}\n"
+            text += "━━━━━━━━━━━━━━━━━━━━━\n"
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("➕ ADD TASK ➕", callback_data="admin_add_task"),
+        InlineKeyboardButton("🔄 REFRESH 🔄", callback_data="admin_tasks")
+    )
+    markup.row(
+        InlineKeyboardButton("✏️ EDIT TASK ✏️", callback_data="admin_edit_task"),
+        InlineKeyboardButton("❌ DELETE ❌", callback_data="admin_delete_task")
+    )
+    markup.row(
+        InlineKeyboardButton("🔙 BACK TO ADMIN 🔙", callback_data="admin_panel")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_add_task")
+def admin_add_task_start(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    # Store session
+    session_data = {
+        "stage": "task_name",
+        "data": {}
+    }
+    cursor.execute("""
+        INSERT OR REPLACE INTO admin_sessions (admin_id, session_data, updated_at)
+        VALUES (?, ?, ?)
+    """, (user_id, str(session_data), datetime.now()))
+    conn.commit()
+    
+    text = """
+━━━━━━━━━━━━━━━━━━━━━
+➕ **CREATE NEW TASK** ➕
+━━━━━━━━━━━━━━━━━━━━━
+
+📝 **Step 1/4: Task Name**
+━━━━━━━━━━━━━━━━━━━━━
+
+Please enter a name for this task:
+
+💡 Example: "Join Our Channel"
+"""
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("❌ CANCEL ❌", callback_data="admin_tasks")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_edit_task")
+def admin_edit_task_prompt(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    text = """
+━━━━━━━━━━━━━━━━━━━━━
+✏️ **EDIT TASK** ✏️
+━━━━━━━━━━━━━━━━━━━━━
+
+Please enter the Task ID you want to edit:
+
+💡 You can find Task IDs in the task list
+"""
+    
+    # Store session
+    session_data = {
+        "stage": "edit_task_id",
+        "data": {}
+    }
+    cursor.execute("""
+        INSERT OR REPLACE INTO admin_sessions (admin_id, session_data, updated_at)
+        VALUES (?, ?, ?)
+    """, (user_id, str(session_data), datetime.now()))
+    conn.commit()
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("❌ CANCEL ❌", callback_data="admin_tasks")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_delete_task")
+def admin_delete_task_prompt(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    text = """
+━━━━━━━━━━━━━━━━━━━━━
+❌ **DELETE TASK** ❌
+━━━━━━━━━━━━━━━━━━━━━
+
+Please enter the Task ID you want to delete:
+
+⚠️ **WARNING:** This action cannot be undone!
+All task completion records will also be deleted.
+
+💡 You can find Task IDs in the task list
+"""
+    
+    # Store session
+    session_data = {
+        "stage": "delete_task_id",
+        "data": {}
+    }
+    cursor.execute("""
+        INSERT OR REPLACE INTO admin_sessions (admin_id, session_data, updated_at)
+        VALUES (?, ?, ?)
+    """, (user_id, str(session_data), datetime.now()))
+    conn.commit()
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("❌ CANCEL ❌", callback_data="admin_tasks")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+# ================= ADMIN WITHDRAWAL MANAGEMENT =================
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_withdrawals")
+def admin_withdrawals(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    cursor.execute("""
+        SELECT wr.id, wr.user_id, wr.amount, wr.withdrawal_type, wr.request_time, u.first_name
+        FROM withdraw_requests wr
+        LEFT JOIN users_wallet u ON wr.user_id = u.user_id
+        WHERE wr.status = 'pending'
+        ORDER BY wr.request_time ASC
+    """)
+    pending = cursor.fetchall()
+    
+    if not pending:
+        text = """
+━━━━━━━━━━━━━━━━━━━━━
+💳 **WITHDRAWAL MANAGEMENT** 💳
+━━━━━━━━━━━━━━━━━━━━━
+
+✅ No pending withdrawal requests!
+━━━━━━━━━━━━━━━━━━━━━
+"""
+    else:
+        text = """
+━━━━━━━━━━━━━━━━━━━━━
+💳 **PENDING WITHDRAWALS** 💳
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        for req in pending:
+            req_id, user_id_req, amount, w_type, req_time, name = req
+            name = name or f"User {user_id_req}"
+            text += f"\n🆔 **Request #{req_id}**\n"
+            text += f"👤 **User:** {name}\n"
+            text += f"💰 **Amount:** {amount} 🟡⭐\n"
+            text += f"📦 **Type:** {w_type.upper()}\n"
+            text += f"📅 **Time:** {req_time[:16]}\n"
+            text += f"✅ Approve: `/approve_withdraw {user_id_req} {amount}`\n"
+            text += "━━━━━━━━━━━━━━━━━━━━━\n"
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("🔄 REFRESH 🔄", callback_data="admin_withdrawals"),
+        InlineKeyboardButton("🔙 BACK 🔙", callback_data="admin_panel")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+# ================= ADMIN VERIFICATIONS =================
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_verifications")
+def admin_verifications(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    cursor.execute("""
+        SELECT ut.id, ut.user_id, ut.task_id, t.task_name, t.reward, ut.completed_at, u.first_name
+        FROM user_tasks ut
+        JOIN tasks t ON ut.task_id = t.id
+        LEFT JOIN users_wallet u ON ut.user_id = u.user_id
+        WHERE ut.verified = 0
+        ORDER BY ut.completed_at ASC
+    """)
+    pending = cursor.fetchall()
+    
+    if not pending:
+        text = """
+━━━━━━━━━━━━━━━━━━━━━
+🔍 **PENDING VERIFICATIONS** 🔍
+━━━━━━━━━━━━━━━━━━━━━
+
+✅ No pending task verifications!
+━━━━━━━━━━━━━━━━━━━━━
+"""
+    else:
+        text = """
+━━━━━━━━━━━━━━━━━━━━━
+🔍 **PENDING VERIFICATIONS** 🔍
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        for ver in pending[:10]:  # Show first 10
+            ver_id, user_id_ver, task_id, task_name, reward, comp_time, name = ver
+            name = name or f"User {user_id_ver}"
+            text += f"\n🆔 **Verification #{ver_id}**\n"
+            text += f"👤 **User:** {name}\n"
+            text += f"📋 **Task:** {task_name}\n"
+            text += f"💰 **Reward:** {reward} 🟡⭐\n"
+            text += f"📅 **Completed:** {comp_time[:16]}\n"
+            text += f"✅ Verify: `/verify_task {user_id_ver} {task_id}`\n"
+            text += "━━━━━━━━━━━━━━━━━━━━━\n"
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("🔄 REFRESH 🔄", callback_data="admin_verifications"),
+        InlineKeyboardButton("🔙 BACK 🔙", callback_data="admin_panel")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+# ================= ADMIN STATISTICS =================
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_stats")
+def admin_stats(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    # Get various stats (excluding admins)
+    placeholders = ','.join('?' * len(ADMIN_IDS))
+    
+    cursor.execute(f"SELECT COUNT(*) FROM users_wallet WHERE user_id NOT IN ({placeholders})", ADMIN_IDS)
+    total_users = cursor.fetchone()[0]
+    
+    cursor.execute(f"SELECT COUNT(*) FROM users_wallet WHERE premium=1 AND user_id NOT IN ({placeholders})", ADMIN_IDS)
+    premium_users = cursor.fetchone()[0]
+    
+    cursor.execute(f"SELECT SUM(stars) FROM users_wallet WHERE user_id NOT IN ({placeholders})", ADMIN_IDS)
+    total_stars = cursor.fetchone()[0] or 0
+    
+    cursor.execute(f"SELECT AVG(stars) FROM users_wallet WHERE user_id NOT IN ({placeholders})", ADMIN_IDS)
+    avg_stars = cursor.fetchone()[0] or 0
+    
+    cursor.execute(f"SELECT SUM(total_earned) FROM users_wallet WHERE user_id NOT IN ({placeholders})", ADMIN_IDS)
+    total_earned_all = cursor.fetchone()[0] or 0
+    
+    cursor.execute("SELECT COUNT(*) FROM tasks")
+    total_tasks = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM user_tasks WHERE verified=1")
+    completed_tasks = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM withdraw_requests WHERE status='approved'")
+    approved_withdrawals = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT SUM(amount) FROM withdraw_requests WHERE status='approved'")
+    total_withdrawn = cursor.fetchone()[0] or 0
+    
+    cursor.execute("SELECT COUNT(*) FROM payments")
+    total_purchases = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT SUM(stars_purchased) FROM payments")
+    stars_purchased = cursor.fetchone()[0] or 0
+    
+    premium_rate = (premium_users / total_users * 100) if total_users > 0 else 0
+    
+    text = f"""
+━━━━━━━━━━━━━━━━━━━━━
+📊 **DETAILED STATISTICS** 📊
+━━━━━━━━━━━━━━━━━━━━━
+
+👥 **USER STATS**
+━━━━━━━━━━━━━━━━━━━━━
+• **Total Users:** {total_users:,}
+• **Premium Users:** {premium_users:,}
+• **Premium Rate:** {premium_rate:.1f}%
+
+💰 **STAR STATS**
+━━━━━━━━━━━━━━━━━━━━━
+• **Total Stars:** {total_stars:,} 🟡
+• **Average Stars:** {avg_stars:.1f} 🟡
+• **Total Earned:** {total_earned_all:,} 🟡
+• **Stars Purchased:** {stars_purchased:,} 🟡
+
+📋 **TASK STATS**
+━━━━━━━━━━━━━━━━━━━━━
+• **Total Tasks:** {total_tasks}
+• **Completed Tasks:** {completed_tasks:,}
+
+💳 **WITHDRAWAL STATS**
+━━━━━━━━━━━━━━━━━━━━━
+• **Approved Withdrawals:** {approved_withdrawals}
+• **Total Withdrawn:** {total_withdrawn:,} 🟡
+• **Purchases Made:** {total_purchases}
+
+━━━━━━━━━━━━━━━━━━━━━
+"""
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("🔄 REFRESH 🔄", callback_data="admin_stats"),
+        InlineKeyboardButton("🔙 BACK 🔙", callback_data="admin_panel")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+# ================= ADMIN BACKUP =================
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_backup")
+def admin_backup(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        text = """
+━━━━━━━━━━━━━━━━━━━━━
+💾 **BACKUP SYSTEM** 💾
+━━━━━━━━━━━━━━━━━━━━━
+
+❌ GitHub backup is not configured!
+
+To enable backups, set these environment variables:
+• `GITHUB_TOKEN`
+• `GITHUB_REPO`
+
+━━━━━━━━━━━━━━━━━━━━━
+"""
+    else:
+        # Get last backup
+        cursor.execute("SELECT * FROM backup_log ORDER BY backup_time DESC LIMIT 5")
+        backups = cursor.fetchall()
+        
+        text = """
+━━━━━━━━━━━━━━━━━━━━━
+💾 **BACKUP SYSTEM** 💾
+━━━━━━━━━━━━━━━━━━━━━
+
+✅ GitHub backup is configured!
+
+📤 **Recent Backups:**
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        if backups:
+            for b in backups:
+                b_id, b_time, b_type, status, details = b
+                status_emoji = "✅" if status == "success" else "❌"
+                text += f"\n{status_emoji} **{b_time[:16]}**\n"
+                text += f"   Type: {b_type}\n"
+                text += f"   {details}\n"
+        else:
+            text += "\nNo backups yet.\n"
+        
+        text += "\n━━━━━━━━━━━━━━━━━━━━━"
+    
+    markup = InlineKeyboardMarkup()
+    if GITHUB_TOKEN and GITHUB_REPO:
+        markup.row(
+            InlineKeyboardButton("💾 BACKUP NOW 💾", callback_data="admin_backup_now")
+        )
+    markup.row(
+        InlineKeyboardButton("🔙 BACK 🔙", callback_data="admin_panel")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "admin_backup_now")
+def admin_backup_now(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    bot.answer_callback_query(call.id, "🔄 Creating backup...", show_alert=False)
+    
+    # Run backup in thread
+    def do_backup():
+        success = backup_to_github("manual", f"Manual backup triggered by admin {user_id}")
+        if success:
+            bot.send_message(call.message.chat.id, "✅ **Backup completed successfully!**", parse_mode="Markdown")
+        else:
+            bot.send_message(call.message.chat.id, "❌ **Backup failed!** Check logs.", parse_mode="Markdown")
+    
+    threading.Thread(target=do_backup, daemon=True).start()
+
+# ================= HANDLE ADMIN TEXT INPUTS =================
+
+@bot.message_handler(func=lambda message: True)
+def handle_admin_input(message):
+    """Handle text inputs for admin sessions"""
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    text = message.text.strip()
+    
+    # Check if user has an active admin session
+    cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,))
+    session = cursor.fetchone()
+    
+    if not session or not is_admin(user_id):
+        return False
+    
+    import ast
+    try:
+        session_data = ast.literal_eval(session[0])
+    except:
+        return False
+    
+    stage = session_data.get("stage")
+    
+    if stage == "task_name":
+        # Store task name
+        session_data["data"]["name"] = text
+        session_data["stage"] = "task_type"
+        
+        cursor.execute("""
+            UPDATE admin_sessions SET session_data=?, updated_at=? WHERE admin_id=?
+        """, (str(session_data), datetime.now(), user_id))
+        conn.commit()
+        
+        markup = InlineKeyboardMarkup()
+        markup.row(
+            InlineKeyboardButton("📢 JOIN CHANNEL", callback_data="admin_task_type_join_channel"),
+            InlineKeyboardButton("👥 JOIN GROUP", callback_data="admin_task_type_join_group")
+        )
+        markup.row(
+            InlineKeyboardButton("🔗 VISIT LINK", callback_data="admin_task_type_visit_link"),
+            InlineKeyboardButton("🎥 WATCH VIDEO", callback_data="admin_task_type_watch_video")
+        )
+        markup.row(
+            InlineKeyboardButton("❌ CANCEL ❌", callback_data="admin_tasks")
+        )
+        
+        bot.send_message(
+            chat_id,
+            f"✅ Task name set to: **{text}**\n\n"
+            "📝 **Step 2/4: Task Type**\n"
+            "Please choose the task type:",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+        return True
+        
+    elif stage == "edit_task_id":
+        try:
+            task_id = int(text)
+            # Check if task exists
+            cursor.execute("SELECT * FROM tasks WHERE id=?", (task_id,))
+            task = cursor.fetchone()
+            
+            if not task:
+                bot.send_message(chat_id, "❌ Task not found! Please enter a valid Task ID.")
+                return True
+            
+            session_data["data"]["edit_task_id"] = task_id
+            session_data["stage"] = "edit_field"
+            
+            cursor.execute("""
+                UPDATE admin_sessions SET session_data=?, updated_at=? WHERE admin_id=?
+            """, (str(session_data), datetime.now(), user_id))
+            conn.commit()
+            
+            task_id, name, t_type, data, reward, max_comp, completed, active, created_by, created = task
+            
+            markup = InlineKeyboardMarkup()
+            markup.row(
+                InlineKeyboardButton("📝 NAME", callback_data="edit_name"),
+                InlineKeyboardButton("💰 REWARD", callback_data="edit_reward")
+            )
+            markup.row(
+                InlineKeyboardButton("📊 TYPE", callback_data="edit_type"),
+                InlineKeyboardButton("🔗 DATA", callback_data="edit_data")
+            )
+            markup.row(
+                InlineKeyboardButton("⚡ ACTIVE", callback_data="edit_active"),
+                InlineKeyboardButton("❌ CANCEL", callback_data="admin_tasks")
+            )
+            
+            status = "✅ ACTIVE" if active else "❌ INACTIVE"
+            bot.send_message(
+                chat_id,
+                f"📋 **Editing Task #{task_id}**\n\n"
+                f"📝 **Name:** {name}\n"
+                f"💰 **Reward:** {reward} 🟡⭐\n"
+                f"📊 **Type:** {t_type}\n"
+                f"🔗 **Data:** {data}\n"
+                f"⚡ **Status:** {status}\n\n"
+                f"Choose what to edit:",
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+            return True
+            
+        except ValueError:
+            bot.send_message(chat_id, "❌ Please enter a valid Task ID (number).")
+            return True
+            
+    elif stage == "delete_task_id":
+        try:
+            task_id = int(text)
+            # Confirm deletion
+            cursor.execute("SELECT task_name FROM tasks WHERE id=?", (task_id,))
+            task = cursor.fetchone()
+            
+            if not task:
+                bot.send_message(chat_id, "❌ Task not found! Please enter a valid Task ID.")
+                return True
+            
+            task_name = task[0]
+            
+            markup = InlineKeyboardMarkup()
+            markup.row(
+                InlineKeyboardButton("✅ YES, DELETE", callback_data=f"confirm_delete_{task_id}"),
+                InlineKeyboardButton("❌ NO, CANCEL", callback_data="admin_tasks")
+            )
+            
+            bot.send_message(
+                chat_id,
+                f"⚠️ **Confirm Deletion**\n\n"
+                f"Are you sure you want to delete task:\n"
+                f"**#{task_id} - {task_name}**?\n\n"
+                f"This action cannot be undone!",
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+            
+            # Clear session
+            cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
+            conn.commit()
+            return True
+            
+        except ValueError:
+            bot.send_message(chat_id, "❌ Please enter a valid Task ID (number).")
+            return True
+    
+    return False
+
+# ================= ADMIN CALLBACKS FOR TASK CREATION =================
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("admin_task_type_"))
+def admin_task_type(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    task_type = call.data.replace("admin_task_type_", "")
+    
+    # Get session
+    cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,))
+    session = cursor.fetchone()
+    
+    if not session:
+        bot.answer_callback_query(call.id, "❌ Session expired! Start over.", show_alert=True)
+        return
+    
+    import ast
+    session_data = ast.literal_eval(session[0])
+    
+    session_data["data"]["type"] = task_type
+    session_data["stage"] = "task_data"
+    
+    cursor.execute("""
+        UPDATE admin_sessions SET session_data=?, updated_at=? WHERE admin_id=?
+    """, (str(session_data), datetime.now(), user_id))
+    conn.commit()
+    
+    # Ask for task data based on type
+    if task_type in ["join_channel", "join_group"]:
+        prompt = "🔗 Please enter the channel/group username or invite link:\n\n💡 Example: @mychannel or https://t.me/mychannel"
+    elif task_type == "visit_link":
+        prompt = "🔗 Please enter the website link:\n\n💡 Example: https://example.com"
+    elif task_type == "watch_video":
+        prompt = "🎥 Please enter the video link:\n\n💡 Example: https://youtube.com/watch?v=..."
+    else:
+        prompt = "🔗 Please enter the task data/link:"
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("❌ CANCEL ❌", callback_data="admin_tasks")
+    )
+    
+    bot.edit_message_text(
+        f"📝 **Step 3/4: Task Data**\n\n{prompt}",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("edit_"))
+def admin_edit_field(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    field = call.data.replace("edit_", "")
+    
+    # Get session
+    cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,))
+    session = cursor.fetchone()
+    
+    if not session:
+        bot.answer_callback_query(call.id, "❌ Session expired!", show_alert=True)
+        return
+    
+    import ast
+    session_data = ast.literal_eval(session[0])
+    task_id = session_data["data"]["edit_task_id"]
+    
+    if field == "name":
+        session_data["stage"] = "edit_name"
+        prompt = "📝 Enter new task name:"
+    elif field == "reward":
+        session_data["stage"] = "edit_reward"
+        prompt = "💰 Enter new reward amount (in 🟡⭐):"
+    elif field == "type":
+        session_data["stage"] = "edit_type"
+        markup = InlineKeyboardMarkup()
+        markup.row(
+            InlineKeyboardButton("📢 JOIN CHANNEL", callback_data="edit_type_join_channel"),
+            InlineKeyboardButton("👥 JOIN GROUP", callback_data="edit_type_join_group")
+        )
+        markup.row(
+            InlineKeyboardButton("🔗 VISIT LINK", callback_data="edit_type_visit_link"),
+            InlineKeyboardButton("🎥 WATCH VIDEO", callback_data="edit_type_watch_video")
+        )
+        markup.row(
+            InlineKeyboardButton("❌ CANCEL", callback_data="admin_tasks")
+        )
+        
+        bot.edit_message_text(
+            "📊 Select new task type:",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+        return
+    elif field == "data":
+        session_data["stage"] = "edit_data"
+        prompt = "🔗 Enter new task data/link:"
+    elif field == "active":
+        # Toggle active status
+        cursor.execute("SELECT active FROM tasks WHERE id=?", (task_id,))
+        current = cursor.fetchone()[0]
+        new_status = 0 if current == 1 else 1
+        
+        cursor.execute("UPDATE tasks SET active=? WHERE id=?", (new_status, task_id))
+        conn.commit()
+        
+        status_text = "activated" if new_status == 1 else "deactivated"
+        bot.answer_callback_query(call.id, f"✅ Task {status_text}!", show_alert=True)
+        
+        # Clear session and return to task list
+        cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
+        conn.commit()
+        
+        # Show updated task list
+        admin_tasks(call)
+        return
+    
+    cursor.execute("""
+        UPDATE admin_sessions SET session_data=?, updated_at=? WHERE admin_id=?
+    """, (str(session_data), datetime.now(), user_id))
+    conn.commit()
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("❌ CANCEL ❌", callback_data="admin_tasks")
+    )
+    
+    bot.edit_message_text(
+        prompt,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("edit_type_"))
+def admin_edit_type(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    new_type = call.data.replace("edit_type_", "")
+    
+    # Get session
+    cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,))
+    session = cursor.fetchone()
+    
+    if not session:
+        bot.answer_callback_query(call.id, "❌ Session expired!", show_alert=True)
+        return
+    
+    import ast
+    session_data = ast.literal_eval(session[0])
+    task_id = session_data["data"]["edit_task_id"]
+    
+    # Update task type
+    cursor.execute("UPDATE tasks SET task_type=? WHERE id=?", (new_type, task_id))
+    conn.commit()
+    
+    bot.answer_callback_query(call.id, "✅ Task type updated!", show_alert=True)
+    
+    # Clear session
+    cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
+    conn.commit()
+    
+    # Show updated task list
+    admin_tasks(call)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("confirm_delete_"))
+def admin_confirm_delete(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    task_id = int(call.data.replace("confirm_delete_", ""))
+    
+    # Delete task and related records
+    cursor.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+    cursor.execute("DELETE FROM user_tasks WHERE task_id=?", (task_id,))
+    conn.commit()
+    
+    bot.answer_callback_query(call.id, f"✅ Task #{task_id} deleted!", show_alert=True)
+    
+    # Return to task list
+    admin_tasks(call)
+
+# ================= TASKS SYSTEM =================
+
+@bot.callback_query_handler(func=lambda c: c.data == "show_tasks")
+def show_tasks(call):
+    user_id = call.from_user.id
+    cursor.execute("SELECT * FROM tasks WHERE active=1 ORDER BY created_at DESC")
+    tasks = cursor.fetchall()
+    
+    if not tasks:
+        text = """
+━━━━━━━━━━━━━━━━━━━━━
+📋 **NO TASKS AVAILABLE** 📋
+━━━━━━━━━━━━━━━━━━━━━
+
+😔 There are no tasks available right now.
+
+💡 Check back later for new earning opportunities!
+
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        markup = InlineKeyboardMarkup()
+        markup.row(
+            InlineKeyboardButton("💰 EARN STARS 💰", callback_data="earn"),
+            InlineKeyboardButton("🔙 BACK 🔙", callback_data="back")
+        )
+        
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+        return
+    
+    text = """
+━━━━━━━━━━━━━━━━━━━━━
+📋 **AVAILABLE TASKS** 📋
+━━━━━━━━━━━━━━━━━━━━━
+
+👇 Click a task to view details:
+\n
+"""
+    
+    markup = InlineKeyboardMarkup()
+    for task in tasks:
+        task_id, task_name, task_type, task_data, reward, max_comp, completed, active, created_by, created_at = task
+        
+        # Choose emoji based on task type
+        if task_type == "join_channel":
+            emoji = "📢"
+        elif task_type == "join_group":
+            emoji = "👥"
+        elif task_type == "visit_link":
+            emoji = "🔗"
+        elif task_type == "watch_video":
+            emoji = "🎥"
+        else:
+            emoji = "📋"
+        
+        markup.add(InlineKeyboardButton(
+            f"{emoji} {task_name[:30]} - {reward}🟡⭐",
+            callback_data=f"task_details_{task_id}"
+        ))
+    
+    # Add admin panel button for admins
+    if is_admin(user_id):
+        markup.row(
+            InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+        )
+    
+    markup.row(
+        InlineKeyboardButton("💰 EARN STARS 💰", callback_data="earn"),
+        InlineKeyboardButton("🔙 BACK 🔙", callback_data="back")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("task_details_"))
+def task_details(call):
+    user_id = call.from_user.id
+    task_id = int(call.data.replace("task_details_", ""))
+    
+    cursor.execute("SELECT * FROM tasks WHERE id=?", (task_id,))
+    task = cursor.fetchone()
+    
+    if not task:
+        bot.answer_callback_query(call.id, "❌ Task not found!", show_alert=True)
+        return
+    
+    task_id, task_name, task_type, task_data, reward, max_comp, completed, active, created_by, created_at = task
+    
+    # Check if user already completed this task
+    cursor.execute("SELECT * FROM user_tasks WHERE user_id=? AND task_id=?", (user_id, task_id))
+    existing = cursor.fetchone()
+    
+    # Task type emoji
+    type_emoji = {
+        "join_channel": "📢",
+        "join_group": "👥",
+        "visit_link": "🔗",
+        "watch_video": "🎥"
+    }.get(task_type, "📋")
+    
+    type_name = {
+        "join_channel": "Join Channel",
+        "join_group": "Join Group",
+        "visit_link": "Visit Link",
+        "watch_video": "Watch Video"
+    }.get(task_type, task_type)
+    
+    text = f"""
+━━━━━━━━━━━━━━━━━━━━━
+{type_emoji} **TASK DETAILS** {type_emoji}
+━━━━━━━━━━━━━━━━━━━━━
+
+📋 **{task_name}**
+
+━━━━━━━━━━━━━━━━━━━━━
+💰 **Reward:** {reward} 🟡⭐
+📌 **Type:** {type_name}
+━━━━━━━━━━━━━━━━━━━━━
+
+"""
+    
+    if task_type == "join_channel":
+        text += f"🔗 **Channel:** {task_data}\n\n"
+        text += "✅ **How to complete:**\n"
+        text += "1. Join the channel above\n"
+        text += "2. Click 'Verify & Claim'\n"
+        text += "3. Reward will be added automatically!\n\n"
+    elif task_type == "join_group":
+        text += f"👥 **Group:** {task_data}\n\n"
+        text += "✅ **How to complete:**\n"
+        text += "1. Join the group above\n"
+        text += "2. Click 'Verify & Claim'\n"
+        text += "3. Reward will be added automatically!\n\n"
+    elif task_type == "visit_link":
+        text += f"🔗 **Link:** {task_data}\n\n"
+        text += "✅ **How to complete:**\n"
+        text += "1. Visit the link above\n"
+        text += "2. Click 'Submit for Verification'\n"
+        text += "3. Admin will verify and add reward\n\n"
+    
+    if existing:
+        status = existing[4]  # verified field
+        if status == 1:
+            text += "✅ **Status:** Already Completed ✓"
+        elif status == 0:
+            text += "⏳ **Status:** Pending Verification"
+        else:
+            text += "❌ **Status:** Rejected"
+    
+    text += "━━━━━━━━━━━━━━━━━━━━━"
+    
+    markup = InlineKeyboardMarkup()
+    
+    if not existing:
+        if task_type in ["join_channel", "join_group"]:
+            markup.row(
+                InlineKeyboardButton("🔗 JOIN NOW 🔗", url=task_data),
+                InlineKeyboardButton("✅ VERIFY ✅", callback_data=f"claim_task_{task_id}")
+            )
+        else:
+            markup.row(
+                InlineKeyboardButton("🔗 VISIT LINK 🔗", url=task_data),
+                InlineKeyboardButton("📝 SUBMIT 📝", callback_data=f"claim_task_{task_id}")
+            )
+    elif existing[4] == 1:
+        markup.row(
+            InlineKeyboardButton("✅ COMPLETED ✅", callback_data="noop")
+        )
+    
+    markup.row(
+        InlineKeyboardButton("📋 ALL TASKS 📋", callback_data="show_tasks"),
+        InlineKeyboardButton("🔙 BACK 🔙", callback_data="back")
+    )
+    
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("claim_task_"))
+def claim_task(call):
+    user_id = call.from_user.id
+    task_id = int(call.data.replace("claim_task_", ""))
+    
+    cursor.execute("SELECT * FROM tasks WHERE id=?", (task_id,))
+    task = cursor.fetchone()
+    
+    if not task:
+        bot.answer_callback_query(call.id, "❌ Task not found!", show_alert=True)
+        return
+    
+    task_name, task_type, task_data, reward = task[1], task[2], task[3], task[4]
+    
+    # Check if already completed
+    cursor.execute("SELECT * FROM user_tasks WHERE user_id=? AND task_id=?", (user_id, task_id))
+    existing = cursor.fetchone()
+    
+    if existing:
+        bot.answer_callback_query(call.id, "❌ You already completed this task!", show_alert=True)
+        return
+    
+    if task_type in ["join_channel", "join_group"]:
+        # Auto-verify channel/group join
+        try:
+            # Extract username from task_data
+            chat_id = task_data.replace("https://t.me/", "").replace("@", "")
+            if not chat_id.startswith("@"):
+                chat_id = "@" + chat_id
+            
+            chat_member = bot.get_chat_member(chat_id, user_id)
+            if chat_member.status in ['member', 'administrator', 'creator']:
+                # Auto-verify
+                cursor.execute("""
+                    INSERT INTO user_tasks (user_id, task_id, verified, verified_at)
+                    VALUES (?, ?, 1, ?)
+                """, (user_id, task_id, datetime.now()))
+                add_stars(user_id, reward, trigger_backup=True)
+                conn.commit()
+                
+                # Update task completed count
+                cursor.execute("UPDATE tasks SET completed_count = completed_count + 1 WHERE id=?", (task_id,))
+                conn.commit()
+                
+                user_name = get_user_display_name(user_id)
+                
+                bot.answer_callback_query(
+                    call.id, 
+                    f"✅ Task completed! You earned {reward} 🟡⭐!", 
+                    show_alert=True
+                )
+                
+                # Update message
+                text = f"""
+━━━━━━━━━━━━━━━━━━━━━
+✅ **TASK COMPLETED!** ✅
+━━━━━━━━━━━━━━━━━━━━━
+
+👤 **{user_name}**
+
+📋 **Task:** {task_name}
+💰 **Reward:** +{reward} 🟡⭐
+
+━━━━━━━━━━━━━━━━━━━━━
+📊 **New Balance:** {get_wallet(user_id)[1]} 🟡⭐
+━━━━━━━━━━━━━━━━━━━━━
+"""
+                markup = InlineKeyboardMarkup()
+                markup.row(
+                    InlineKeyboardButton("📋 MORE TASKS 📋", callback_data="show_tasks"),
+                    InlineKeyboardButton("💰 EARN MORE 💰", callback_data="earn")
+                )
+                
+                # Add admin panel button for admins
+                if is_admin(user_id):
+                    markup.row(
+                        InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+                    )
+                
+                bot.edit_message_text(
+                    text,
+                    call.message.chat.id,
+                    call.message.message_id,
+                    reply_markup=markup,
+                    parse_mode="Markdown"
+                )
+                
+                # Backup on task completion
+                if GITHUB_TOKEN and GITHUB_REPO:
+                    threading.Thread(target=backup_to_github, args=("task_complete", f"User {user_id} completed task {task_id}"), daemon=True).start()
+                
+            else:
+                bot.answer_callback_query(
+                    call.id, 
+                    "❌ You haven't joined yet! Please join first.", 
+                    show_alert=True
+                )
+        except Exception as e:
+            print(f"❌ Task verification error: {e}")
+            bot.answer_callback_query(
+                call.id, 
+                "❌ Error verifying. Please make sure you've joined and try again.", 
+                show_alert=True
+            )
+    
+    elif task_type in ["visit_link", "watch_video"]:
+        # Manual verification needed
+        cursor.execute("""
+            INSERT INTO user_tasks (user_id, task_id, verified)
+            VALUES (?, ?, 0)
+        """, (user_id, task_id))
+        conn.commit()
+        
+        user_name = get_user_display_name(user_id)
+        
+        # Notify admins
+        for admin_id in ADMIN_IDS:
+            try:
+                admin_text = f"""
+🔔 **TASK VERIFICATION NEEDED** 🔔
+
+👤 **User:** {user_name}
+🆔 **User ID:** `{user_id}`
+📋 **Task:** {task_name}
+💰 **Reward:** {reward} 🟡⭐
+
+━━━━━━━━━━━━━━━━━━━━━
+✅ To verify, use:
+`/verify_task {user_id} {task_id}`
+━━━━━━━━━━━━━━━━━━━━━
+"""
+                bot.send_message(admin_id, admin_text, parse_mode="Markdown")
+            except:
+                pass
+        
+        bot.answer_callback_query(
+            call.id, 
+            "✅ Task submitted for verification! Admin will verify soon.", 
+            show_alert=True
+        )
+        
+        # Update message
+        text = f"""
+━━━━━━━━━━━━━━━━━━━━━
+⏳ **TASK SUBMITTED** ⏳
+━━━━━━━━━━━━━━━━━━━━━
+
+👤 **{user_name}**
+
+📋 **Task:** {task_name}
+💰 **Reward:** {reward} 🟡⭐
+
+━━━━━━━━━━━━━━━━━━━━━
+✅ Your task has been submitted for admin verification.
+
+⏱️ Verification usually takes 5-15 minutes.
+
+You will be notified when it's approved!
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        markup = InlineKeyboardMarkup()
+        markup.row(
+            InlineKeyboardButton("📋 MORE TASKS 📋", callback_data="show_tasks"),
+            InlineKeyboardButton("💰 EARN MORE 💰", callback_data="earn")
+        )
+        
+        # Add admin panel button for admins
+        if is_admin(user_id):
+            markup.row(
+                InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+            )
+        
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+
+@bot.message_handler(commands=['verify_task'])
+def verify_task(message):
+    """Admin command to verify task completion"""
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    try:
+        parts = message.text.split()
+        target_user = int(parts[1])
+        task_id = int(parts[2])
+        
+        # Get task details
+        cursor.execute("SELECT reward FROM tasks WHERE id=?", (task_id,))
+        task = cursor.fetchone()
+        if not task:
+            bot.send_message(message.chat.id, "❌ Task not found!")
+            return
+        
+        reward = task[0]
+        
+        # Update task verification
+        cursor.execute("""
+            UPDATE user_tasks 
+            SET verified = 1, verified_by = ?, verified_at = ?
+            WHERE user_id = ? AND task_id = ?
+        """, (user_id, datetime.now(), target_user, task_id))
+        
+        # Add stars to user
+        add_stars(target_user, reward, trigger_backup=True)
+        
+        # Update task completed count
+        cursor.execute("UPDATE tasks SET completed_count = completed_count + 1 WHERE id=?", (task_id,))
+        conn.commit()
+        
+        # Notify user
+        try:
+            bot.send_message(
+                target_user,
+                f"✅ **Task Verified!**\n\n"
+                f"Your task has been verified by an admin!\n"
+                f"💰 You earned {reward} 🟡⭐!\n\n"
+                f"📊 New Balance: {get_wallet(target_user)[1]} 🟡⭐",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
+        
+        bot.send_message(message.chat.id, f"✅ Task verified for user {target_user}!")
+        
+        # Trigger backup
+        if GITHUB_TOKEN and GITHUB_REPO:
+            threading.Thread(target=backup_to_github, args=("task_verified", f"Admin verified task {task_id} for user {target_user}"), daemon=True).start()
+        
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Usage: /verify_task [user_id] [task_id]")
+
+@bot.message_handler(commands=['approve_withdraw'])
+def approve_withdraw(message):
+    """Admin command to approve withdrawal"""
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    try:
+        parts = message.text.split()
+        target_user = int(parts[1])
+        amount = int(parts[2])
+        
+        # Find pending request
+        cursor.execute("""
+            SELECT id FROM withdraw_requests 
+            WHERE user_id = ? AND amount = ? AND status = 'pending' AND withdrawal_type = 'admin'
+            ORDER BY request_time DESC LIMIT 1
+        """, (target_user, amount))
+        
+        result = cursor.fetchone()
+        if not result:
+            bot.send_message(message.chat.id, "❌ No matching pending request found!")
+            return
+        
+        req_id = result[0]
+        
+        # Process approval
+        cursor.execute("""
+            UPDATE users_wallet SET stars = stars - ? WHERE user_id = ?
+        """, (amount, target_user))
+        
+        cursor.execute("""
+            UPDATE withdraw_requests SET status = 'approved', processed_time = ?
+            WHERE id = ?
+        """, (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), req_id))
+        conn.commit()
+        
+        # Notify user
+        try:
+            bot.send_message(
+                target_user,
+                f"✅ **Withdrawal Approved!**\n\n"
+                f"Amount: {amount} 🟡⭐\n"
+                f"Your admin withdrawal request has been approved!\n"
+                f"Please contact admins for payment details.",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
+        
+        bot.send_message(message.chat.id, f"✅ Withdrawal approved for user {target_user}!")
+        
+        # Trigger backup
+        if GITHUB_TOKEN and GITHUB_REPO:
+            threading.Thread(target=backup_to_github, args=("withdrawal_approved", f"Admin approved {amount} for user {target_user}"), daemon=True).start()
+        
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Usage: /approve_withdraw [user_id] [amount]")
 
 # ================= WITHDRAWAL MENU =================
 
@@ -896,7 +2364,7 @@ def withdraw_menu(call):
         # Admin buttons - no premium required, no limits
         markup.row(
             InlineKeyboardButton("⭐ WITHDRAW AS STARS ⭐", callback_data="withdraw_stars_menu"),
-            InlineKeyboardButton("💼 ADMIN WITHDRAW 💼", callback_data="withdraw_admin_menu")
+            InlineKeyboardButton("💼 ADMIN WITHDRAW 💼", callback_data="withdraw_admin")
         )
     else:
         # Regular user buttons - premium check
@@ -1097,6 +2565,12 @@ You'll receive the stars directly in your Telegram wallet!
         InlineKeyboardButton("💰 EARN MORE 💰", callback_data="earn"),
         InlineKeyboardButton("🔙 BACK 🔙", callback_data="withdraw_menu")
     )
+    
+    # Add admin panel button for admins
+    if is_admin(user_id):
+        markup.row(
+            InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+        )
     
     bot.edit_message_text(
         text,
@@ -1333,469 +2807,6 @@ def handle_withdrawal_amount(message):
         )
         return True
 
-# ================= ADMIN APPROVAL COMMANDS =================
-
-@bot.message_handler(commands=['approve_withdraw'])
-def approve_withdraw(message):
-    """Admin command to approve withdrawal"""
-    user_id = message.from_user.id
-    if not is_admin(user_id):
-        return
-    
-    try:
-        parts = message.text.split()
-        target_user = int(parts[1])
-        amount = int(parts[2])
-        
-        # Find pending request
-        cursor.execute("""
-            SELECT id FROM withdraw_requests 
-            WHERE user_id = ? AND amount = ? AND status = 'pending' AND withdrawal_type = 'admin'
-            ORDER BY request_time DESC LIMIT 1
-        """, (target_user, amount))
-        
-        result = cursor.fetchone()
-        if not result:
-            bot.send_message(message.chat.id, "❌ No matching pending request found!")
-            return
-        
-        req_id = result[0]
-        
-        # Process approval
-        cursor.execute("""
-            UPDATE users_wallet SET stars = stars - ? WHERE user_id = ?
-        """, (amount, target_user))
-        
-        cursor.execute("""
-            UPDATE withdraw_requests SET status = 'approved', processed_time = ?
-            WHERE id = ?
-        """, (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), req_id))
-        conn.commit()
-        
-        # Notify user
-        try:
-            bot.send_message(
-                target_user,
-                f"✅ **Withdrawal Approved!**\n\n"
-                f"Amount: {amount} 🟡⭐\n"
-                f"Your admin withdrawal request has been approved!\n"
-                f"Please contact admins for payment details.",
-                parse_mode="Markdown"
-            )
-        except:
-            pass
-        
-        bot.send_message(message.chat.id, f"✅ Withdrawal approved for user {target_user}!")
-        
-        # Trigger backup
-        if GITHUB_TOKEN and GITHUB_REPO:
-            threading.Thread(target=backup_to_github, args=("withdrawal_approved", f"Admin approved {amount} for user {target_user}"), daemon=True).start()
-        
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Usage: /approve_withdraw [user_id] [amount]")
-
-# ================= TASKS SYSTEM =================
-
-@bot.callback_query_handler(func=lambda c: c.data == "show_tasks")
-def show_tasks(call):
-    cursor.execute("SELECT * FROM tasks WHERE active=1 ORDER BY created_at DESC")
-    tasks = cursor.fetchall()
-    
-    if not tasks:
-        text = """
-━━━━━━━━━━━━━━━━━━━━━
-📋 **NO TASKS AVAILABLE** 📋
-━━━━━━━━━━━━━━━━━━━━━
-
-😔 There are no tasks available right now.
-
-💡 Check back later for new earning opportunities!
-
-━━━━━━━━━━━━━━━━━━━━━
-"""
-        markup = InlineKeyboardMarkup()
-        markup.row(
-            InlineKeyboardButton("💰 EARN STARS 💰", callback_data="earn"),
-            InlineKeyboardButton("🔙 BACK 🔙", callback_data="back")
-        )
-        
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
-        return
-    
-    text = """
-━━━━━━━━━━━━━━━━━━━━━
-📋 **AVAILABLE TASKS** 📋
-━━━━━━━━━━━━━━━━━━━━━
-
-👇 Click a task to view details:
-\n
-"""
-    
-    markup = InlineKeyboardMarkup()
-    for task in tasks:
-        task_id, task_name, task_type, task_data, reward, max_comp, active, created_by, created_at = task
-        
-        # Choose emoji based on task type
-        if task_type == "join_channel":
-            emoji = "📢"
-        elif task_type == "join_group":
-            emoji = "👥"
-        elif task_type == "visit_link":
-            emoji = "🔗"
-        elif task_type == "watch_video":
-            emoji = "🎥"
-        else:
-            emoji = "📋"
-        
-        markup.add(InlineKeyboardButton(
-            f"{emoji} {task_name[:30]} - {reward}🟡⭐",
-            callback_data=f"task_details_{task_id}"
-        ))
-    
-    markup.row(
-        InlineKeyboardButton("💰 EARN STARS 💰", callback_data="earn"),
-        InlineKeyboardButton("🔙 BACK 🔙", callback_data="back")
-    )
-    
-    bot.edit_message_text(
-        text,
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("task_details_"))
-def task_details(call):
-    task_id = int(call.data.replace("task_details_", ""))
-    
-    cursor.execute("SELECT * FROM tasks WHERE id=?", (task_id,))
-    task = cursor.fetchone()
-    
-    if not task:
-        bot.answer_callback_query(call.id, "❌ Task not found!", show_alert=True)
-        return
-    
-    task_id, task_name, task_type, task_data, reward, max_comp, active, created_by, created_at = task
-    
-    # Check if user already completed this task
-    cursor.execute("SELECT * FROM user_tasks WHERE user_id=? AND task_id=?", (call.from_user.id, task_id))
-    existing = cursor.fetchone()
-    
-    # Task type emoji
-    type_emoji = {
-        "join_channel": "📢",
-        "join_group": "👥",
-        "visit_link": "🔗",
-        "watch_video": "🎥"
-    }.get(task_type, "📋")
-    
-    type_name = {
-        "join_channel": "Join Channel",
-        "join_group": "Join Group",
-        "visit_link": "Visit Link",
-        "watch_video": "Watch Video"
-    }.get(task_type, task_type)
-    
-    text = f"""
-━━━━━━━━━━━━━━━━━━━━━
-{type_emoji} **TASK DETAILS** {type_emoji}
-━━━━━━━━━━━━━━━━━━━━━
-
-📋 **{task_name}**
-
-━━━━━━━━━━━━━━━━━━━━━
-💰 **Reward:** {reward} 🟡⭐
-📌 **Type:** {type_name}
-━━━━━━━━━━━━━━━━━━━━━
-
-"""
-    
-    if task_type == "join_channel":
-        text += f"🔗 **Channel:** {task_data}\n\n"
-        text += "✅ **How to complete:**\n"
-        text += "1. Join the channel above\n"
-        text += "2. Click 'Verify & Claim'\n"
-        text += "3. Reward will be added automatically!\n\n"
-    elif task_type == "join_group":
-        text += f"👥 **Group:** {task_data}\n\n"
-        text += "✅ **How to complete:**\n"
-        text += "1. Join the group above\n"
-        text += "2. Click 'Verify & Claim'\n"
-        text += "3. Reward will be added automatically!\n\n"
-    elif task_type == "visit_link":
-        text += f"🔗 **Link:** {task_data}\n\n"
-        text += "✅ **How to complete:**\n"
-        text += "1. Visit the link above\n"
-        text += "2. Click 'Submit for Verification'\n"
-        text += "3. Admin will verify and add reward\n\n"
-    
-    if existing:
-        status = existing[4]  # verified field
-        if status == 1:
-            text += "✅ **Status:** Already Completed ✓"
-        elif status == 0:
-            text += "⏳ **Status:** Pending Verification"
-        else:
-            text += "❌ **Status:** Rejected"
-    
-    text += "━━━━━━━━━━━━━━━━━━━━━"
-    
-    markup = InlineKeyboardMarkup()
-    
-    if not existing:
-        if task_type in ["join_channel", "join_group"]:
-            markup.row(
-                InlineKeyboardButton("🔗 JOIN NOW 🔗", url=task_data),
-                InlineKeyboardButton("✅ VERIFY ✅", callback_data=f"claim_task_{task_id}")
-            )
-        else:
-            markup.row(
-                InlineKeyboardButton("🔗 VISIT LINK 🔗", url=task_data),
-                InlineKeyboardButton("📝 SUBMIT 📝", callback_data=f"claim_task_{task_id}")
-            )
-    elif existing[4] == 1:
-        markup.row(
-            InlineKeyboardButton("✅ COMPLETED ✅", callback_data="noop")
-        )
-    
-    markup.row(
-        InlineKeyboardButton("📋 ALL TASKS 📋", callback_data="show_tasks"),
-        InlineKeyboardButton("🔙 BACK 🔙", callback_data="back")
-    )
-    
-    bot.edit_message_text(
-        text,
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("claim_task_"))
-def claim_task(call):
-    user_id = call.from_user.id
-    task_id = int(call.data.replace("claim_task_", ""))
-    
-    cursor.execute("SELECT * FROM tasks WHERE id=?", (task_id,))
-    task = cursor.fetchone()
-    
-    if not task:
-        bot.answer_callback_query(call.id, "❌ Task not found!", show_alert=True)
-        return
-    
-    task_name, task_type, task_data, reward = task[1], task[2], task[3], task[4]
-    
-    # Check if already completed
-    cursor.execute("SELECT * FROM user_tasks WHERE user_id=? AND task_id=?", (user_id, task_id))
-    existing = cursor.fetchone()
-    
-    if existing:
-        bot.answer_callback_query(call.id, "❌ You already completed this task!", show_alert=True)
-        return
-    
-    if task_type in ["join_channel", "join_group"]:
-        # Auto-verify channel/group join
-        try:
-            # Extract username from task_data
-            chat_id = task_data.replace("https://t.me/", "").replace("@", "")
-            if not chat_id.startswith("@"):
-                chat_id = "@" + chat_id
-            
-            chat_member = bot.get_chat_member(chat_id, user_id)
-            if chat_member.status in ['member', 'administrator', 'creator']:
-                # Auto-verify
-                cursor.execute("""
-                    INSERT INTO user_tasks (user_id, task_id, verified, verified_at)
-                    VALUES (?, ?, 1, ?)
-                """, (user_id, task_id, datetime.now()))
-                add_stars(user_id, reward, trigger_backup=True)
-                conn.commit()
-                
-                user_name = get_user_display_name(user_id)
-                
-                bot.answer_callback_query(
-                    call.id, 
-                    f"✅ Task completed! You earned {reward} 🟡⭐!", 
-                    show_alert=True
-                )
-                
-                # Update message
-                text = f"""
-━━━━━━━━━━━━━━━━━━━━━
-✅ **TASK COMPLETED!** ✅
-━━━━━━━━━━━━━━━━━━━━━
-
-👤 **{user_name}**
-
-📋 **Task:** {task_name}
-💰 **Reward:** +{reward} 🟡⭐
-
-━━━━━━━━━━━━━━━━━━━━━
-📊 **New Balance:** {get_wallet(user_id)[1]} 🟡⭐
-━━━━━━━━━━━━━━━━━━━━━
-"""
-                markup = InlineKeyboardMarkup()
-                markup.row(
-                    InlineKeyboardButton("📋 MORE TASKS 📋", callback_data="show_tasks"),
-                    InlineKeyboardButton("💰 EARN MORE 💰", callback_data="earn")
-                )
-                
-                bot.edit_message_text(
-                    text,
-                    call.message.chat.id,
-                    call.message.message_id,
-                    reply_markup=markup,
-                    parse_mode="Markdown"
-                )
-                
-                # Backup on task completion
-                if GITHUB_TOKEN and GITHUB_REPO:
-                    threading.Thread(target=backup_to_github, args=("task_complete", f"User {user_id} completed task {task_id}"), daemon=True).start()
-                
-            else:
-                bot.answer_callback_query(
-                    call.id, 
-                    "❌ You haven't joined yet! Please join first.", 
-                    show_alert=True
-                )
-        except Exception as e:
-            print(f"❌ Task verification error: {e}")
-            bot.answer_callback_query(
-                call.id, 
-                "❌ Error verifying. Please make sure you've joined and try again.", 
-                show_alert=True
-            )
-    
-    elif task_type in ["visit_link", "watch_video"]:
-        # Manual verification needed
-        cursor.execute("""
-            INSERT INTO user_tasks (user_id, task_id, verified)
-            VALUES (?, ?, 0)
-        """, (user_id, task_id))
-        conn.commit()
-        
-        user_name = get_user_display_name(user_id)
-        
-        # Notify admins
-        for admin_id in ADMIN_IDS:
-            try:
-                admin_text = f"""
-🔔 **TASK VERIFICATION NEEDED** 🔔
-
-👤 **User:** {user_name}
-🆔 **User ID:** `{user_id}`
-📋 **Task:** {task_name}
-💰 **Reward:** {reward} 🟡⭐
-
-━━━━━━━━━━━━━━━━━━━━━
-✅ To verify, use:
-`/verify_task {user_id} {task_id}`
-━━━━━━━━━━━━━━━━━━━━━
-"""
-                bot.send_message(admin_id, admin_text, parse_mode="Markdown")
-            except:
-                pass
-        
-        bot.answer_callback_query(
-            call.id, 
-            "✅ Task submitted for verification! Admin will verify soon.", 
-            show_alert=True
-        )
-        
-        # Update message
-        text = f"""
-━━━━━━━━━━━━━━━━━━━━━
-⏳ **TASK SUBMITTED** ⏳
-━━━━━━━━━━━━━━━━━━━━━
-
-👤 **{user_name}**
-
-📋 **Task:** {task_name}
-💰 **Reward:** {reward} 🟡⭐
-
-━━━━━━━━━━━━━━━━━━━━━
-✅ Your task has been submitted for admin verification.
-
-⏱️ Verification usually takes 5-15 minutes.
-
-You will be notified when it's approved!
-━━━━━━━━━━━━━━━━━━━━━
-"""
-        markup = InlineKeyboardMarkup()
-        markup.row(
-            InlineKeyboardButton("📋 MORE TASKS 📋", callback_data="show_tasks"),
-            InlineKeyboardButton("💰 EARN MORE 💰", callback_data="earn")
-        )
-        
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
-
-@bot.message_handler(commands=['verify_task'])
-def verify_task(message):
-    """Admin command to verify task completion"""
-    user_id = message.from_user.id
-    if not is_admin(user_id):
-        return
-    
-    try:
-        parts = message.text.split()
-        target_user = int(parts[1])
-        task_id = int(parts[2])
-        
-        # Get task details
-        cursor.execute("SELECT reward FROM tasks WHERE id=?", (task_id,))
-        task = cursor.fetchone()
-        if not task:
-            bot.send_message(message.chat.id, "❌ Task not found!")
-            return
-        
-        reward = task[0]
-        
-        # Update task verification
-        cursor.execute("""
-            UPDATE user_tasks 
-            SET verified = 1, verified_by = ?, verified_at = ?
-            WHERE user_id = ? AND task_id = ?
-        """, (user_id, datetime.now(), target_user, task_id))
-        
-        # Add stars to user
-        add_stars(target_user, reward, trigger_backup=True)
-        conn.commit()
-        
-        # Notify user
-        try:
-            bot.send_message(
-                target_user,
-                f"✅ **Task Verified!**\n\n"
-                f"Your task has been verified by an admin!\n"
-                f"💰 You earned {reward} 🟡⭐!\n\n"
-                f"📊 New Balance: {get_wallet(target_user)[1]} 🟡⭐",
-                parse_mode="Markdown"
-            )
-        except:
-            pass
-        
-        bot.send_message(message.chat.id, f"✅ Task verified for user {target_user}!")
-        
-        # Trigger backup
-        if GITHUB_TOKEN and GITHUB_REPO:
-            threading.Thread(target=backup_to_github, args=("task_verified", f"Admin verified task {task_id} for user {target_user}"), daemon=True).start()
-        
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Usage: /verify_task [user_id] [task_id]")
-
 # ================= REFERRAL LINK =================
 
 @bot.callback_query_handler(func=lambda c: c.data == "refer")
@@ -1830,6 +2841,13 @@ def refer(call):
         InlineKeyboardButton("📋 COPY LINK 📋", callback_data=f"copy_{refer_link}"),
         InlineKeyboardButton("📊 LEADERBOARD 📊", callback_data="leaderboard")
     )
+    
+    # Add admin panel button for admins
+    if is_admin(user_id):
+        markup.row(
+            InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+        )
+    
     markup.row(
         InlineKeyboardButton("🔙 BACK 🔙", callback_data="back")
     )
@@ -1848,22 +2866,23 @@ def refer(call):
 def premium(call):
     user_id = call.from_user.id
     user = get_wallet(user_id)
+    user_name = get_user_display_name(user_id)
     
     if user[4] == 1:
-        text = """
+        text = f"""
 ━━━━━━━━━━━━━━━━━━━━━
 💎 **PREMIUM ACTIVE** 💎
 ━━━━━━━━━━━━━━━━━━━━━
 
-✅ You already have premium access!
+✅ You already have premium access, **{user_name}**!
 
 ━━━━━━━━━━━━━━━━━━━━━
 **Your Premium Benefits:**
 ━━━━━━━━━━━━━━━━━━━━━
-• 💳 Withdrawals enabled
-• 💼 Admin withdrawal requests
-• 🎯 Higher earning potential
-• 👑 Priority support
+• 💳 **Withdrawals enabled**
+• 💼 **Admin withdrawal requests**
+• 🎯 **Higher earning potential**
+• 👑 **Priority support**
 ━━━━━━━━━━━━━━━━━━━━━
 """
         markup = InlineKeyboardMarkup()
@@ -1872,12 +2891,12 @@ def premium(call):
             InlineKeyboardButton("🔙 BACK 🔙", callback_data="back")
         )
     else:
-        text = """
+        text = f"""
 ━━━━━━━━━━━━━━━━━━━━━
 💎 **PREMIUM MEMBERSHIP** 💎
 ━━━━━━━━━━━━━━━━━━━━━
 
-✨ **Unlock Exclusive Benefits:** ✨
+✨ **Unlock Exclusive Benefits,** **{user_name}**! ✨
 
 ━━━━━━━━━━━━━━━━━━━━━
 ✅ **Withdrawals Enabled**
@@ -1893,12 +2912,14 @@ def premium(call):
    Get help faster
 
 ━━━━━━━━━━━━━━━━━━━━━
-💰 **Price:** Contact Admin
+💰 **Get Premium Now!**
 ━━━━━━━━━━━━━━━━━━━━━
+
+👇 **Click the button below to get premium access:**
 """
         markup = InlineKeyboardMarkup()
         markup.row(
-            InlineKeyboardButton("📨 CONTACT ADMIN 📨", url="https://t.me/admin"),
+            InlineKeyboardButton("💎 GET PREMIUM 💎", url="https://t.me/MA5T3RBot"),
             InlineKeyboardButton("🔙 BACK 🔙", callback_data="back")
         )
     
@@ -1914,6 +2935,7 @@ def premium(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "buy_menu")
 def buy_menu(call):
+    user_id = call.from_user.id
     text = f"""
 ━━━━━━━━━━━━━━━━━━━━━
 🟡 **BUY STARS** 🟡
@@ -1957,6 +2979,7 @@ def buy_menu(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "buy_show")
 def buy_show(call):
+    user_id = call.from_user.id
     markup = InlineKeyboardMarkup()
     
     for stars, price in STAR_PACKAGES.items():
@@ -1964,6 +2987,13 @@ def buy_show(call):
             f"💫 {stars} Stars - {price} ⭐️", 
             callback_data=f"buy_{stars}"
         ))
+    
+    # Add admin panel button for admins
+    if is_admin(user_id):
+        markup.row(
+            InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+        )
+    
     markup.add(InlineKeyboardButton("🔙 BACK", callback_data="buy_menu"))
     
     bot.edit_message_text(
@@ -1976,6 +3006,7 @@ def buy_show(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
 def process_buy(call):
+    user_id = call.from_user.id
     if call.data == "buy_menu":
         return
     
@@ -2062,7 +3093,8 @@ def payment_success(message):
 
 @bot.callback_query_handler(func=lambda c: c.data == "back")
 def back(call):
-    user_name = get_user_display_name(call.from_user.id)
+    user_id = call.from_user.id
+    user_name = get_user_display_name(user_id)
     text = f"""
 ━━━━━━━━━━━━━━━━━━━━━
 ⚡ **PULSE PROFIT** ⚡
@@ -2071,18 +3103,51 @@ def back(call):
 👋 Welcome back **{user_name}**!
 
 ━━━━━━━━━━━━━━━━━━━━━
-💰 **Your Balance:** {get_wallet(call.from_user.id)[1]} 🟡⭐
+💰 **Your Balance:** {get_wallet(user_id)[1]} 🟡⭐
 ━━━━━━━━━━━━━━━━━━━━━
 
 👇 **Choose an option below:** 👇
 """
+    
+    # Check if user is admin to show admin panel option
+    markup = main_menu()
+    if is_admin(user_id):
+        admin_markup = InlineKeyboardMarkup()
+        admin_markup.row(
+            InlineKeyboardButton("💼✨ EARN STARS 💼✨", callback_data="earn"),
+            InlineKeyboardButton("📋✅ TASKS 📋✅", callback_data="show_tasks")
+        )
+        admin_markup.row(
+            InlineKeyboardButton("📨🔥 REFER & EARN 📨🔥", callback_data="refer"),
+            InlineKeyboardButton("👤🌈 PROFILE 👤🌈", callback_data="profile")
+        )
+        admin_markup.row(
+            InlineKeyboardButton("🏆🎖 LEADERBOARD 🏆🎖", callback_data="leaderboard"),
+            InlineKeyboardButton("💎🚀 PREMIUM 💎🚀", callback_data="premium")
+        )
+        admin_markup.row(
+            InlineKeyboardButton("🟡💰 BUY STARS 🟡💰", callback_data="buy_menu"),
+            InlineKeyboardButton("💳🏦 WITHDRAW 💳🏦", callback_data="withdraw_menu")
+        )
+        admin_markup.row(
+            InlineKeyboardButton("👑 ADMIN PANEL 👑", callback_data="admin_panel")
+        )
+        markup = admin_markup
+    
     bot.edit_message_text(
         text,
         call.message.chat.id,
         call.message.message_id,
-        reply_markup=main_menu(),
+        reply_markup=markup,
         parse_mode="Markdown"
     )
+
+# ================= NOOP CALLBACK =================
+
+@bot.callback_query_handler(func=lambda c: c.data == "noop")
+def noop(call):
+    """Do nothing callback"""
+    bot.answer_callback_query(call.id)
 
 # ================= ADMIN DAILY BONUS =================
 
@@ -2133,13 +3198,6 @@ def webhook():
         print(f"❌ Webhook error: {e}")
         return 'ERROR', 500
 
-# ================= NOOP CALLBACK =================
-
-@bot.callback_query_handler(func=lambda c: c.data == "noop")
-def noop(call):
-    """Do nothing callback"""
-    bot.answer_callback_query(call.id)
-
 # ================= MAIN EXECUTION =================
 
 if __name__ == "__main__":
@@ -2153,6 +3211,8 @@ if __name__ == "__main__":
     print("   - Stars Withdrawal: Available to all users")
     print("⭐ Telegram Stars: Active")
     print("📋 Task System: Active")
+    print("👑 Admin Panel: Active")
+    print("🏆 Leaderboard: Admins hidden from view")
     print("🛡️ Anti-Spam Cooldown: Active")
     print("💾 GitHub Backup: " + ("Active" if GITHUB_TOKEN and GITHUB_REPO else "Disabled"))
     print("=" * 50)
