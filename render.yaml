@@ -1,20 +1,13 @@
 services:
   - type: web
-    name: telegram-promotion-bot
+    name: gold-ultimate-bot
     env: python
-    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py
+    startCommand: gunicorn bot:app
     envVars:
-      - key: TELEGRAM_BOT_TOKEN
+      - key: BOT_TOKEN
         sync: false
       - key: GITHUB_TOKEN
         sync: false
-      - key: GITHUB_REPO_OWNER
-        sync: false
-      - key: GITHUB_REPO_NAME
-        sync: false
-      - key: TARGET_CHANNELS
-        sync: false
-      - key: ADMIN_USER_IDS
+      - key: GITHUB_REPO
         sync: false
