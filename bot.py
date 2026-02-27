@@ -543,33 +543,42 @@ def is_admin(user_id):
     """Check if user is admin"""
     return user_id in ADMIN_IDS
 
-# ================= CHANNEL VERIFICATION DECORATOR =================
+# ================= CHANNEL VERIFICATION DECORATOR (FIXED) =================
 
 def requires_channel(func):
     """Decorator to check if user has joined the channel before accessing features"""
     def wrapper(message_or_call):
-        user_id = None
-        chat_id = None
-        message_id = None
-        
+        # Extract user_id safely
         if hasattr(message_or_call, 'from_user'):
-            # It's a message
             user_id = message_or_call.from_user.id
             chat_id = message_or_call.chat.id
+            message_id = None
+            username = getattr(message_or_call.from_user, 'username', '')
+            first_name = getattr(message_or_call.from_user, 'first_name', 'User')
         elif hasattr(message_or_call, 'message'):
-            # It's a callback query
             user_id = message_or_call.from_user.id
             chat_id = message_or_call.message.chat.id
             message_id = message_or_call.message.message_id
+            username = getattr(message_or_call.from_user, 'username', '')
+            first_name = getattr(message_or_call.from_user, 'first_name', 'User')
+        else:
+            # Unknown type, let it pass
+            return func(message_or_call)
+        
+        # Check if user is admin (admins bypass channel requirement)
+        if is_admin(user_id):
+            # Ensure admin has wallet
+            get_wallet(user_id)
+            return func(message_or_call)
         
         # Check if user has joined the channel
         if not is_user_verified(user_id):
             # Check actual membership
             if check_channel_membership(user_id):
                 # Mark as joined in database
-                username = message_or_call.from_user.username if hasattr(message_or_call.from_user, 'username') else ""
-                first_name = message_or_call.from_user.first_name
                 mark_user_joined(user_id, username, first_name)
+                # Ensure wallet exists
+                get_wallet(user_id)
                 # User is now verified, proceed
                 return func(message_or_call)
             else:
@@ -579,7 +588,7 @@ def requires_channel(func):
 🔒 **CHANNEL REQUIRED** 🔒
 ━━━━━━━━━━━━━━━━━━━━━
 
-👋 Hello **{get_user_display_name(user_id)}**!
+👋 Hello **{first_name}**!
 
 To access Pulse Profit bot, you must join our channel first.
 
@@ -601,7 +610,7 @@ To access Pulse Profit bot, you must join our channel first.
                     InlineKeyboardButton("✅ I'VE JOINED ✅", callback_data="verify_channel")
                 )
                 
-                if hasattr(message_or_call, 'message'):
+                if message_id:
                     # It's a callback query - edit message
                     bot.edit_message_text(
                         channel_text,
@@ -620,7 +629,8 @@ To access Pulse Profit bot, you must join our channel first.
                     )
                 return None
         else:
-            # User is verified, proceed
+            # User is verified, ensure wallet exists
+            get_wallet(user_id)
             return func(message_or_call)
     return wrapper
 
@@ -759,11 +769,11 @@ threading.Thread(target=process_withdrawals, daemon=True).start()
 @bot.callback_query_handler(func=lambda c: c.data == "verify_channel")
 def verify_channel(call):
     user_id = call.from_user.id
+    username = call.from_user.username if call.from_user.username else ""
+    first_name = call.from_user.first_name
     
     if check_channel_membership(user_id):
         # Mark as joined in database
-        username = call.from_user.username if call.from_user.username else ""
-        first_name = call.from_user.first_name
         mark_user_joined(user_id, username, first_name)
         
         # Get wallet
@@ -3641,7 +3651,7 @@ def daily_admin_bonus():
 
 threading.Thread(target=daily_admin_bonus, daemon=True).start()
 
-# ================= HANDLE ALL TEXT MESSAGES =================
+# ================= HANDLE ALL TEXT MESSAGES (FIXED TASK CREATION FLOW) =================
 
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
