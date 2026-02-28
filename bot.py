@@ -311,7 +311,10 @@ def reset_daily_withdrawals():
     print("✅ Daily withdrawal limits reset")
 
 def generate_code():
+    """Generate a random 8-character code in format XXXX-XXXX"""
     chars = string.ascii_uppercase + string.digits
+    # Exclude confusing characters
+    chars = chars.replace('O', '').replace('0', '').replace('I', '').replace('1', '')
     code = ''.join(random.choices(chars, k=8))
     return f"{code[:4]}-{code[4:]}"
 
@@ -656,7 +659,6 @@ def approve_premium(message):
             return
         
         target_user = int(parts[1])
-        admin_name = get_user_name(admin_id)
         
         # Check if request exists
         cursor.execute("SELECT id FROM premium_requests WHERE user_id=? AND status='pending'", (target_user,))
@@ -671,7 +673,6 @@ def approve_premium(message):
         cursor.execute("UPDATE premium_requests SET status='approved' WHERE user_id=? AND status='pending'", (target_user,))
         conn.commit()
         
-        # Notify admin
         bot.reply_to(message, f"✅ Premium approved for user {target_user}!")
         
         # Notify user
@@ -722,7 +723,6 @@ def reject_premium(message):
             return
         
         target_user = int(parts[1])
-        admin_name = get_user_name(admin_id)
         
         # Check if request exists
         cursor.execute("SELECT id FROM premium_requests WHERE user_id=? AND status='pending'", (target_user,))
@@ -736,7 +736,6 @@ def reject_premium(message):
         cursor.execute("UPDATE premium_requests SET status='rejected' WHERE user_id=? AND status='pending'", (target_user,))
         conn.commit()
         
-        # Notify admin
         bot.reply_to(message, f"❌ Premium rejected for user {target_user}!")
         
         # Notify user
@@ -1081,60 +1080,128 @@ def show_tasks_callback(call):
     tasks = cursor.fetchall()
     
     if not tasks:
+        text = "📋 No tasks available at the moment."
         bot.answer_callback_query(call.id, "No tasks available", show_alert=True)
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_menu(user_id))
         return
     
-    text = "📋 AVAILABLE TASKS\n\n"
+    text = "📋 **AVAILABLE TASKS**\n\n"
     markup = InlineKeyboardMarkup()
-    for t in tasks:
-        text += f"• {t[1]} - {t[2]}⭐\n"
-        markup.row(InlineKeyboardButton(f"✓ {t[1][:20]}", callback_data=f"do_task_{t[0]}"))
+    
+    for task in tasks:
+        task_id, task_name, reward = task
+        text += f"• **{task_name}** - `+{reward}⭐`\n"
+        markup.row(InlineKeyboardButton(f"✅ {task_name[:20]} - {reward}⭐", callback_data=f"do_task_{task_id}"))
+    
     markup.row(InlineKeyboardButton("🔙 BACK", callback_data="back"))
     
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("do_task_"))
 def do_task_callback(call):
     user_id = call.from_user.id
     task_id = int(call.data.replace("do_task_", ""))
     
+    # Check if user already completed this task
     cursor.execute("SELECT * FROM user_tasks WHERE user_id=? AND task_id=?", (user_id, task_id))
     if cursor.fetchone():
         bot.answer_callback_query(call.id, "You already did this task!", show_alert=True)
         return
     
-    cursor.execute("SELECT task_type, task_data, reward FROM tasks WHERE id=?", (task_id,))
+    # Get task details
+    cursor.execute("SELECT task_type, task_data, reward, task_name FROM tasks WHERE id=?", (task_id,))
     task = cursor.fetchone()
     if not task:
         bot.answer_callback_query(call.id, "Task not found!", show_alert=True)
         return
     
-    task_type, task_data, reward = task
+    task_type, task_data, reward, task_name = task
     
     if task_type in ["join_channel", "join_group"]:
+        # Auto-verify channel/group join
         try:
+            # Extract chat ID from task_data
             chat_id = task_data.replace("https://t.me/", "").replace("@", "")
             if not chat_id.startswith("@"):
                 chat_id = "@" + chat_id
+            
+            # Check membership
             member = bot.get_chat_member(chat_id, user_id)
             if member.status in ['member', 'administrator', 'creator']:
+                # Complete task
                 cursor.execute("INSERT INTO user_tasks (user_id, task_id, verified) VALUES (?,?,1)", (user_id, task_id))
                 add_stars(user_id, reward)
                 conn.commit()
-                bot.answer_callback_query(call.id, f"✅ +{reward}⭐", show_alert=True)
+                
+                bot.answer_callback_query(call.id, f"✅ +{reward}⭐ Task completed!", show_alert=True)
+                
+                # Update message
                 wallet = get_wallet(user_id)
-                bot.edit_message_text(f"✅ Task completed! +{reward}⭐\n\nNew balance: {wallet[1]}⭐", 
-                                     call.message.chat.id, call.message.message_id, reply_markup=main_menu(user_id))
+                text = f"""
+✅ **TASK COMPLETED!**
+
+━━━━━━━━━━━━━━━━━━━━━
+📋 **Task:** {task_name}
+💰 **Reward:** +{reward}⭐
+
+━━━━━━━━━━━━━━━━━━━━━
+📊 **New Balance:** {wallet[1]}⭐
+━━━━━━━━━━━━━━━━━━━━━
+"""
+                bot.edit_message_text(text, call.message.chat.id, call.message.message_id, 
+                                     reply_markup=main_menu(user_id), parse_mode="Markdown")
+                
+                # Backup on task completion
+                if GITHUB_TOKEN and GITHUB_REPO:
+                    threading.Thread(target=backup_to_github, args=("task_complete", f"User {user_id} completed task {task_id}"), daemon=True).start()
             else:
-                bot.answer_callback_query(call.id, "❌ You haven't joined yet!", show_alert=True)
-        except:
-            bot.answer_callback_query(call.id, "❌ Error verifying join", show_alert=True)
+                bot.answer_callback_query(call.id, "❌ You haven't joined yet! Please join first.", show_alert=True)
+        except Exception as e:
+            print(f"Error verifying join: {e}")
+            bot.answer_callback_query(call.id, "❌ Error verifying. Please make sure you've joined and try again.", show_alert=True)
     else:
+        # Manual verification needed (visit_link, watch_video)
         cursor.execute("INSERT INTO user_tasks (user_id, task_id, verified) VALUES (?,?,0)", (user_id, task_id))
         conn.commit()
-        bot.answer_callback_query(call.id, "Submitted for verification", show_alert=True)
-        bot.edit_message_text("✅ Task submitted for admin verification", 
-                             call.message.chat.id, call.message.message_id, reply_markup=main_menu(user_id))
+        
+        # Notify admins
+        user_name = get_user_name(user_id)
+        for admin_id in ADMIN_IDS:
+            try:
+                admin_text = f"""
+🔔 **TASK VERIFICATION NEEDED** 🔔
+
+━━━━━━━━━━━━━━━━━━━━━
+👤 **User:** {user_name}
+🆔 **ID:** `{user_id}`
+📋 **Task:** {task_name}
+💰 **Reward:** {reward}⭐
+━━━━━━━━━━━━━━━━━━━━━
+
+✅ To verify, use:
+`/verify_task {user_id} {task_name}`
+━━━━━━━━━━━━━━━━━━━━━
+"""
+                bot.send_message(admin_id, admin_text, parse_mode="Markdown")
+            except:
+                pass
+        
+        bot.answer_callback_query(call.id, "✅ Task submitted for verification!", show_alert=True)
+        
+        text = f"""
+✅ **TASK SUBMITTED FOR VERIFICATION**
+
+━━━━━━━━━━━━━━━━━━━━━
+📋 **Task:** {task_name}
+💰 **Reward:** {reward}⭐ (pending)
+
+━━━━━━━━━━━━━━━━━━━━━
+⏳ An admin will verify your completion soon.
+You'll be notified when it's approved.
+━━━━━━━━━━━━━━━━━━━━━
+"""
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, 
+                             reply_markup=main_menu(user_id), parse_mode="Markdown")
 
 # ================= ADMIN PANEL =================
 @bot.callback_query_handler(func=lambda c: c.data == "admin_panel")
@@ -1155,65 +1222,43 @@ def admin_panel_callback(call):
     pending_premium = cursor.fetchone()[0]
     cursor.execute("SELECT COUNT(*) FROM user_tasks WHERE verified=0")
     verify = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM redeem_codes WHERE active=1")
+    codes = cursor.fetchone()[0]
     
     text = f"""
-👑 ADMIN PANEL
+👑 **ADMIN PANEL**
 
-Users: {users}
-Active Tasks: {tasks}
-Pending Withdrawals: {pending_withdrawals}
-Pending Premium: {pending_premium}
-Pending Verifications: {verify}
+━━━━━━━━━━━━━━━━━━━━━
+📊 **STATISTICS**
+━━━━━━━━━━━━━━━━━━━━━
+👥 Users: {users}
+💰 Total Stars: Coming soon
+📋 Active Tasks: {tasks}
+⏳ Pending Withdrawals: {pending_withdrawals}
+👑 Pending Premium: {pending_premium}
+🔍 Pending Verifications: {verify}
+🎫 Active Codes: {codes}
+━━━━━━━━━━━━━━━━━━━━━
 
-Choose option:
+🛠️ **Choose an option:**
 """
     markup = InlineKeyboardMarkup()
     markup.row(
-        InlineKeyboardButton("📋 TASKS", callback_data="admin_tasks"),
-        InlineKeyboardButton("🎫 CODES", callback_data="admin_codes")
+        InlineKeyboardButton("📋 MANAGE TASKS", callback_data="admin_tasks"),
+        InlineKeyboardButton("🎫 MANAGE CODES", callback_data="admin_codes")
     )
     markup.row(
         InlineKeyboardButton("💳 WITHDRAWALS", callback_data="admin_withdrawals"),
         InlineKeyboardButton("👑 PREMIUM", callback_data="admin_premium")
     )
     markup.row(
-        InlineKeyboardButton("🔍 VERIFY", callback_data="admin_verify"),
+        InlineKeyboardButton("🔍 VERIFY TASKS", callback_data="admin_verify"),
         InlineKeyboardButton("📊 STATS", callback_data="admin_stats")
     )
     markup.row(
         InlineKeyboardButton("💾 BACKUP", callback_data="admin_backup"),
         InlineKeyboardButton("🔙 BACK", callback_data="back")
     )
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
-
-# ================= ADMIN PREMIUM REQUESTS =================
-@bot.callback_query_handler(func=lambda c: c.data == "admin_premium")
-def admin_premium_callback(call):
-    user_id = call.from_user.id
-    if not is_admin(user_id):
-        return
-    
-    cursor.execute("""
-        SELECT pr.id, pr.user_id, u.first_name, pr.request_time 
-        FROM premium_requests pr
-        LEFT JOIN users u ON pr.user_id = u.user_id
-        WHERE pr.status='pending'
-        ORDER BY pr.request_time ASC
-    """)
-    pending = cursor.fetchall()
-    
-    text = "👑 PENDING PREMIUM REQUESTS\n\n"
-    if pending:
-        for req in pending:
-            name = req[2] or f"User {req[1]}"
-            text += f"• {name} (ID: {req[1]}) - {req[3][:16]}\n"
-            text += f"  Approve: `/approve_premium {req[1]}`\n"
-            text += f"  Reject: `/reject_premium {req[1]}`\n\n"
-    else:
-        text += "No pending requests.\n"
-    
-    markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton("🔙 BACK", callback_data="admin_panel"))
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
 # ================= ADMIN TASKS =================
@@ -1223,24 +1268,25 @@ def admin_tasks_callback(call):
     if not is_admin(user_id):
         return
     
-    cursor.execute("SELECT id, task_name, reward, active FROM tasks ORDER BY id DESC LIMIT 10")
+    cursor.execute("SELECT id, task_name, task_type, reward, active FROM tasks ORDER BY id DESC LIMIT 10")
     tasks = cursor.fetchall()
     
-    text = "📋 TASKS\n\n"
+    text = "📋 **TASK MANAGEMENT**\n\n"
     if tasks:
         for t in tasks:
-            status = "✅" if t[3] else "❌"
-            text += f"{status} ID:{t[0]} - {t[1][:20]} - {t[2]}⭐\n"
+            status = "✅" if t[4] else "❌"
+            text += f"{status} ID: `{t[0]}` - **{t[1]}**\n"
+            text += f"   Type: {t[2]} | Reward: {t[3]}⭐\n\n"
     else:
         text += "No tasks yet.\n"
     
     markup = InlineKeyboardMarkup()
     markup.row(
-        InlineKeyboardButton("➕ ADD", callback_data="admin_add_task"),
-        InlineKeyboardButton("❌ DELETE", callback_data="admin_del_task")
+        InlineKeyboardButton("➕ CREATE TASK", callback_data="admin_add_task"),
+        InlineKeyboardButton("❌ DELETE TASK", callback_data="admin_del_task")
     )
     markup.row(InlineKeyboardButton("🔙 BACK", callback_data="admin_panel"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
 # ================= ADD TASK =================
 @bot.callback_query_handler(func=lambda c: c.data == "admin_add_task")
@@ -1249,10 +1295,10 @@ def admin_add_task_callback(call):
     if not is_admin(user_id):
         return
     
-    text = "➕ ADD TASK\n\nEnter task name:"
+    text = "➕ **CREATE NEW TASK**\n\nStep 1/4: Enter task name:"
     cursor.execute("INSERT OR REPLACE INTO user_actions (user_id, action_type) VALUES (?,?)", (user_id, "add_task_name"))
     conn.commit()
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
 # ================= TASK TYPE CALLBACKS =================
 @bot.callback_query_handler(func=lambda c: c.data.startswith("task_type_"))
@@ -1271,7 +1317,7 @@ def task_type_callback(call):
     
     data = cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,)).fetchone()
     if not data:
-        bot.answer_callback_query(call.id, "Session expired", show_alert=True)
+        bot.answer_callback_query(call.id, "Session expired. Please start over.", show_alert=True)
         return
     
     task = json.loads(data[0])
@@ -1280,7 +1326,8 @@ def task_type_callback(call):
     cursor.execute("UPDATE user_actions SET action_type=? WHERE user_id=?", ("add_task_data", user_id))
     conn.commit()
     
-    bot.edit_message_text("🔗 Enter link/data:", call.message.chat.id, call.message.message_id)
+    bot.edit_message_text("🔗 **Step 3/4:** Enter the link or channel username:\n\nExample: @channel or https://t.me/channel", 
+                         call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
 # ================= DELETE TASK =================
 @bot.callback_query_handler(func=lambda c: c.data == "admin_del_task")
@@ -1289,10 +1336,10 @@ def admin_del_task_callback(call):
     if not is_admin(user_id):
         return
     
-    text = "❌ DELETE TASK\n\nEnter Task ID:"
+    text = "❌ **DELETE TASK**\n\nEnter the Task ID to delete:"
     cursor.execute("INSERT OR REPLACE INTO user_actions (user_id, action_type) VALUES (?,?)", (user_id, "del_task"))
     conn.commit()
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
 # ================= ADMIN CODES =================
 @bot.callback_query_handler(func=lambda c: c.data == "admin_codes")
@@ -1304,19 +1351,20 @@ def admin_codes_callback(call):
     cursor.execute("SELECT id, code, amount, max_uses, used_count, expires_at, active FROM redeem_codes ORDER BY id DESC LIMIT 10")
     codes = cursor.fetchall()
     
-    text = "🎫 REDEEM CODES\n\n"
+    text = "🎫 **REDEEM CODE MANAGEMENT**\n\n"
     if codes:
         for c in codes:
             status = "✅" if c[6] else "❌"
             expires = c[5][:10] if c[5] else "Never"
-            text += f"{status} {c[1]} - {c[2]}⭐ - Used: {c[4]}/{c[3]} - Exp: {expires}\n"
+            text += f"{status} `{c[1]}`\n"
+            text += f"   Amount: {c[2]}⭐ | Used: {c[4]}/{c[3]} | Exp: {expires}\n\n"
     else:
         text += "No codes yet.\n"
     
     markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton("➕ CREATE", callback_data="admin_create_code"))
+    markup.row(InlineKeyboardButton("➕ CREATE CODE", callback_data="admin_create_code"))
     markup.row(InlineKeyboardButton("🔙 BACK", callback_data="admin_panel"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
 # ================= CREATE CODE =================
 @bot.callback_query_handler(func=lambda c: c.data == "admin_create_code")
@@ -1325,10 +1373,10 @@ def admin_create_code_callback(call):
     if not is_admin(user_id):
         return
     
-    text = "➕ CREATE CODE\n\nEnter amount:"
+    text = "➕ **CREATE REDEEM CODE**\n\nStep 1/3: Enter the star amount:"
     cursor.execute("INSERT OR REPLACE INTO user_actions (user_id, action_type) VALUES (?,?)", (user_id, "create_code_amount"))
     conn.commit()
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
 # ================= ADMIN WITHDRAWALS =================
 @bot.callback_query_handler(func=lambda c: c.data == "admin_withdrawals")
@@ -1345,15 +1393,47 @@ def admin_withdrawals_callback(call):
     """)
     pending = cursor.fetchall()
     
-    text = "💳 PENDING ADMIN WITHDRAWALS\n\n"
+    text = "💳 **PENDING ADMIN WITHDRAWALS**\n\n"
     if pending:
         for p in pending:
             name = get_user_name(p[1])
-            text += f"• {name} (ID: {p[1]}) - {p[2]}⭐ - {p[3][:16]}\n"
+            text += f"• **{name}** (ID: `{p[1]}`)\n"
+            text += f"  Amount: {p[2]}⭐ | Time: {p[3][:16]}\n"
             text += f"  Approve: `/approve_withdraw {p[1]} {p[2]}`\n"
             text += f"  Reject: `/reject_withdraw {p[1]} {p[2]}`\n\n"
     else:
-        text += "None\n"
+        text += "No pending withdrawals.\n"
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("🔙 BACK", callback_data="admin_panel"))
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+
+# ================= ADMIN PREMIUM REQUESTS =================
+@bot.callback_query_handler(func=lambda c: c.data == "admin_premium")
+def admin_premium_callback(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    cursor.execute("""
+        SELECT pr.id, pr.user_id, u.first_name, pr.request_time 
+        FROM premium_requests pr
+        LEFT JOIN users u ON pr.user_id = u.user_id
+        WHERE pr.status='pending'
+        ORDER BY pr.request_time ASC
+    """)
+    pending = cursor.fetchall()
+    
+    text = "👑 **PENDING PREMIUM REQUESTS**\n\n"
+    if pending:
+        for req in pending:
+            name = req[2] or f"User {req[1]}"
+            text += f"• **{name}** (ID: `{req[1]}`)\n"
+            text += f"  Time: {req[3][:16]}\n"
+            text += f"  Approve: `/approve_premium {req[1]}`\n"
+            text += f"  Reject: `/reject_premium {req[1]}`\n\n"
+    else:
+        text += "No pending requests.\n"
     
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton("🔙 BACK", callback_data="admin_panel"))
@@ -1371,21 +1451,23 @@ def admin_verify_callback(call):
         FROM user_tasks ut 
         JOIN tasks t ON ut.task_id=t.id 
         WHERE ut.verified=0
+        ORDER BY ut.completed_at ASC
     """)
     pending = cursor.fetchall()
     
-    text = "🔍 PENDING VERIFICATIONS\n\n"
+    text = "🔍 **PENDING TASK VERIFICATIONS**\n\n"
     if pending:
         for p in pending:
             name = get_user_name(p[1])
-            text += f"ID:{p[0]} - {name} - {p[2][:15]} - {p[3]}⭐\n"
-            text += f"Verify: `/verify_task {p[1]} {p[2]}`\n\n"
+            text += f"• **{name}** (ID: `{p[1]}`)\n"
+            text += f"  Task: {p[2][:30]} | Reward: {p[3]}⭐\n"
+            text += f"  Verify: `/verify_task {p[1]} {p[2]}`\n\n"
     else:
-        text += "None\n"
+        text += "No pending verifications.\n"
     
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton("🔙 BACK", callback_data="admin_panel"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
 # ================= ADMIN STATS =================
 @bot.callback_query_handler(func=lambda c: c.data == "admin_stats")
@@ -1420,21 +1502,30 @@ def admin_stats_callback(call):
     cursor.execute("SELECT COUNT(*) FROM redeemed_codes")
     redeemed = cursor.fetchone()[0]
     
+    cursor.execute("SELECT COUNT(*) FROM premium_requests WHERE status='pending'")
+    premium_pending = cursor.fetchone()[0]
+    
     text = f"""
-📊 STATISTICS
+📊 **BOT STATISTICS**
 
-Users: {users}
-Total Stars: {stars} 🟡
-Average Stars: {avg} 🟡
-Active Tasks: {tasks}
-Completed Tasks: {completed}
-Approved Withdrawals: {approved}
-Total Codes: {codes}
-Redeemed Codes: {redeemed}
+━━━━━━━━━━━━━━━━━━━━━
+👥 **Users:** {users}
+💰 **Total Stars:** {stars} 🟡
+📊 **Average Stars:** {avg} 🟡
+━━━━━━━━━━━━━━━━━━━━━
+📋 **Active Tasks:** {tasks}
+✅ **Completed Tasks:** {completed}
+━━━━━━━━━━━━━━━━━━━━━
+💳 **Approved Withdrawals:** {approved}
+👑 **Pending Premium:** {premium_pending}
+━━━━━━━━━━━━━━━━━━━━━
+🎫 **Total Codes:** {codes}
+🔄 **Redeemed Codes:** {redeemed}
+━━━━━━━━━━━━━━━━━━━━━
 """
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton("🔙 BACK", callback_data="admin_panel"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
 # ================= ADMIN BACKUP =================
 @bot.callback_query_handler(func=lambda c: c.data == "admin_backup")
@@ -1444,22 +1535,24 @@ def admin_backup_callback(call):
         return
     
     if not GITHUB_TOKEN or not GITHUB_REPO:
-        text = "❌ GitHub backup not configured"
+        text = "❌ GitHub backup is not configured.\n\nSet GITHUB_TOKEN and GITHUB_REPO environment variables to enable backups."
     else:
         cursor.execute("SELECT backup_time, backup_type, status FROM backup_log ORDER BY backup_time DESC LIMIT 5")
         backups = cursor.fetchall()
-        text = "💾 BACKUP SYSTEM\n\nRecent Backups:\n"
+        text = "💾 **BACKUP SYSTEM**\n\n"
         if backups:
+            text += "**Recent Backups:**\n"
             for b in backups:
-                text += f"{b[0][:16]} - {b[1]} - {b[2]}\n"
+                status_icon = "✅" if b[2] == "success" else "❌"
+                text += f"{status_icon} {b[0][:16]} - {b[1]}\n"
         else:
-            text += "No backups yet\n"
+            text += "No backups yet.\n"
     
     markup = InlineKeyboardMarkup()
     if GITHUB_TOKEN and GITHUB_REPO:
         markup.row(InlineKeyboardButton("💾 BACKUP NOW", callback_data="admin_backup_now"))
     markup.row(InlineKeyboardButton("🔙 BACK", callback_data="admin_panel"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda c: c.data == "admin_backup_now")
 def admin_backup_now_callback(call):
@@ -1470,9 +1563,9 @@ def admin_backup_now_callback(call):
     bot.answer_callback_query(call.id, "🔄 Creating backup...")
     success = backup_to_github("manual", f"Manual backup by admin {user_id}")
     if success:
-        bot.send_message(call.message.chat.id, "✅ Backup completed!")
+        bot.send_message(call.message.chat.id, "✅ Backup completed successfully!")
     else:
-        bot.send_message(call.message.chat.id, "❌ Backup failed!")
+        bot.send_message(call.message.chat.id, "❌ Backup failed! Check GitHub configuration.")
 
 # ================= VERIFY TASK COMMAND =================
 @bot.message_handler(commands=['verify_task'])
@@ -1483,16 +1576,17 @@ def verify_task_command(message):
         return
     
     try:
-        parts = message.text.split()
+        parts = message.text.split(maxsplit=2)
         if len(parts) < 3:
             bot.reply_to(message, "❌ Usage: /verify_task [user_id] [task_name]")
             return
         
         target_user = int(parts[1])
-        task_name = ' '.join(parts[2:])
+        task_name = parts[2]
         
+        # Find the pending task
         cursor.execute("""
-            SELECT ut.id, t.reward FROM user_tasks ut
+            SELECT ut.id, t.reward, t.id FROM user_tasks ut
             JOIN tasks t ON ut.task_id = t.id
             WHERE ut.user_id=? AND t.task_name LIKE ? AND ut.verified=0
             ORDER BY ut.completed_at DESC LIMIT 1
@@ -1500,19 +1594,19 @@ def verify_task_command(message):
         task = cursor.fetchone()
         
         if not task:
-            bot.reply_to(message, "❌ No pending task found!")
+            bot.reply_to(message, f"❌ No pending task found for user {target_user} with name '{task_name}'")
             return
         
-        task_id, reward = task
+        task_id, reward, t_id = task
         
         cursor.execute("UPDATE user_tasks SET verified=1 WHERE id=?", (task_id,))
         add_stars(target_user, reward)
         conn.commit()
         
-        bot.reply_to(message, f"✅ Task verified! User got {reward}⭐")
+        bot.reply_to(message, f"✅ Task verified! User {target_user} got {reward}⭐")
         
         try:
-            bot.send_message(target_user, f"✅ Your task has been verified! +{reward}⭐")
+            bot.send_message(target_user, f"✅ Your task '{task_name}' has been verified! +{reward}⭐")
         except:
             pass
     except ValueError:
@@ -1658,6 +1752,10 @@ Use:
     elif action_type == "create_code_amount":
         try:
             amount = int(text)
+            if amount <= 0:
+                bot.send_message(message.chat.id, "❌ Amount must be positive!", reply_markup=main_menu(user_id))
+                return
+            
             cursor.execute("INSERT OR REPLACE INTO admin_sessions (admin_id, session_data) VALUES (?,?)", 
                           (user_id, json.dumps({"amount": amount})))
             conn.commit()
@@ -1665,17 +1763,21 @@ Use:
             cursor.execute("INSERT OR REPLACE INTO user_actions (user_id, action_type) VALUES (?,?)", (user_id, "create_code_expiry"))
             conn.commit()
             
-            bot.send_message(message.chat.id, "📅 Enter expiry days (e.g., 30 for 30 days, 0 for no expiry):")
+            bot.send_message(message.chat.id, "📅 **Step 2/3:** Enter expiry days (e.g., 30 for 30 days, 0 for no expiry):")
         except:
-            bot.send_message(message.chat.id, "❌ Invalid amount!", reply_markup=main_menu(user_id))
+            bot.send_message(message.chat.id, "❌ Invalid amount! Please enter a number.", reply_markup=main_menu(user_id))
     
     # Handle code creation - expiry
     elif action_type == "create_code_expiry":
         try:
             days = int(text)
+            if days < 0:
+                bot.send_message(message.chat.id, "❌ Days cannot be negative!", reply_markup=main_menu(user_id))
+                return
+            
             data = cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,)).fetchone()
             if not data:
-                bot.send_message(message.chat.id, "Session expired", reply_markup=main_menu(user_id))
+                bot.send_message(message.chat.id, "Session expired. Please start over.", reply_markup=main_menu(user_id))
                 return
             
             session = json.loads(data[0])
@@ -1684,32 +1786,40 @@ Use:
             cursor.execute("UPDATE user_actions SET action_type=? WHERE user_id=?", ("create_code_uses", user_id))
             conn.commit()
             
-            bot.send_message(message.chat.id, "🔄 Enter maximum uses (e.g., 10 for 10 uses, 0 for unlimited):")
+            bot.send_message(message.chat.id, "🔄 **Step 3/3:** Enter maximum uses (e.g., 10 for 10 users, 0 for unlimited):")
         except:
-            bot.send_message(message.chat.id, "❌ Invalid number!", reply_markup=main_menu(user_id))
+            bot.send_message(message.chat.id, "❌ Invalid number! Please enter a number.", reply_markup=main_menu(user_id))
     
     # Handle code creation - max uses
     elif action_type == "create_code_uses":
         try:
             max_uses = int(text)
-            if max_uses <= 0:
-                max_uses = 999999  # Unlimited
+            if max_uses < 0:
+                bot.send_message(message.chat.id, "❌ Max uses cannot be negative!", reply_markup=main_menu(user_id))
+                return
+            
+            # Set unlimited if 0
+            if max_uses == 0:
+                max_uses = 999999
             
             data = cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,)).fetchone()
             if not data:
-                bot.send_message(message.chat.id, "Session expired", reply_markup=main_menu(user_id))
+                bot.send_message(message.chat.id, "Session expired. Please start over.", reply_markup=main_menu(user_id))
                 return
             
             session = json.loads(data[0])
             amount = session["amount"]
             expiry_days = session["expiry_days"]
             
+            # Generate unique code
             code = generate_code()
             
+            # Set expiry date
             expires_at = None
             if expiry_days > 0:
                 expires_at = datetime.now() + timedelta(days=expiry_days)
             
+            # Insert into database
             cursor.execute("""
                 INSERT INTO redeem_codes (code, amount, max_uses, expires_at, created_by) 
                 VALUES (?,?,?,?,?)
@@ -1722,16 +1832,17 @@ Use:
             uses_text = "Unlimited" if max_uses > 1000 else str(max_uses)
             
             bot.send_message(message.chat.id, 
-                           f"✅ Code created: `{code}`\n"
-                           f"Amount: {amount}⭐\n"
-                           f"Expires: {expiry_text}\n"
-                           f"Max Uses: {uses_text}", 
+                           f"✅ **CODE CREATED SUCCESSFULLY!**\n\n"
+                           f"🎫 **Code:** `{code}`\n"
+                           f"💰 **Amount:** {amount}⭐\n"
+                           f"📅 **Expires:** {expiry_text}\n"
+                           f"🔄 **Max Uses:** {uses_text}", 
                            parse_mode="Markdown", reply_markup=main_menu(user_id))
             
             if GITHUB_TOKEN and GITHUB_REPO:
                 threading.Thread(target=backup_to_github, args=("new_code", f"Code created for {amount}⭐"), daemon=True).start()
         except:
-            bot.send_message(message.chat.id, "❌ Invalid number!", reply_markup=main_menu(user_id))
+            bot.send_message(message.chat.id, "❌ Invalid number! Please enter a number.", reply_markup=main_menu(user_id))
     
     # Handle task creation - name
     elif action_type == "add_task_name":
@@ -1748,52 +1859,84 @@ Use:
             InlineKeyboardButton("🔗 LINK", callback_data="task_type_link"),
             InlineKeyboardButton("🎥 VIDEO", callback_data="task_type_video")
         )
-        bot.send_message(message.chat.id, "Choose task type:", reply_markup=markup)
+        bot.send_message(message.chat.id, "📌 **Step 2/4:** Choose task type:", reply_markup=markup, parse_mode="Markdown")
     
     # Handle task creation - data
     elif action_type == "add_task_data":
         data = cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,)).fetchone()
         if not data:
-            bot.send_message(message.chat.id, "Session expired", reply_markup=main_menu(user_id))
+            bot.send_message(message.chat.id, "Session expired. Please start over.", reply_markup=main_menu(user_id))
             return
+        
         task = json.loads(data[0])
         task["data"] = text
         cursor.execute("UPDATE admin_sessions SET session_data=? WHERE admin_id=?", (json.dumps(task), user_id))
         cursor.execute("UPDATE user_actions SET action_type=? WHERE user_id=?", ("add_task_reward", user_id))
         conn.commit()
-        bot.send_message(message.chat.id, "💰 Enter reward amount:")
+        
+        bot.send_message(message.chat.id, "💰 **Step 4/4:** Enter reward amount (in 🟡⭐):", parse_mode="Markdown")
     
     # Handle task creation - reward
     elif action_type == "add_task_reward":
         try:
             reward = int(text)
+            if reward <= 0:
+                bot.send_message(message.chat.id, "❌ Reward must be positive!", reply_markup=main_menu(user_id))
+                return
+            
             data = cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,)).fetchone()
             if not data:
-                bot.send_message(message.chat.id, "Session expired", reply_markup=main_menu(user_id))
+                bot.send_message(message.chat.id, "Session expired. Please start over.", reply_markup=main_menu(user_id))
                 return
+            
             task = json.loads(data[0])
             
-            cursor.execute("INSERT INTO tasks (task_name, task_type, task_data, reward, created_by) VALUES (?,?,?,?,?)",
-                          (task["name"], task["type"], task["data"], reward, user_id))
+            cursor.execute("""
+                INSERT INTO tasks (task_name, task_type, task_data, reward, created_by) 
+                VALUES (?,?,?,?,?)
+            """, (task["name"], task["type"], task["data"], reward, user_id))
+            
             cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
             conn.commit()
             
-            bot.send_message(message.chat.id, "✅ Task created!", reply_markup=main_menu(user_id))
+            bot.send_message(message.chat.id, 
+                           f"✅ **TASK CREATED SUCCESSFULLY!**\n\n"
+                           f"📋 **Name:** {task['name']}\n"
+                           f"💰 **Reward:** {reward}⭐\n"
+                           f"📌 **Type:** {task['type']}\n"
+                           f"🔗 **Data:** {task['data']}", 
+                           parse_mode="Markdown", reply_markup=main_menu(user_id))
+            
             if GITHUB_TOKEN and GITHUB_REPO:
                 threading.Thread(target=backup_to_github, args=("new_task", f"Task created: {task['name']}"), daemon=True).start()
         except:
-            bot.send_message(message.chat.id, "❌ Invalid number", reply_markup=main_menu(user_id))
+            bot.send_message(message.chat.id, "❌ Invalid number! Please enter a number.", reply_markup=main_menu(user_id))
     
     # Handle task deletion
     elif action_type == "del_task":
         try:
             task_id = int(text)
+            
+            # Check if task exists
+            cursor.execute("SELECT task_name FROM tasks WHERE id=?", (task_id,))
+            task = cursor.fetchone()
+            if not task:
+                bot.send_message(message.chat.id, f"❌ Task ID {task_id} not found!", reply_markup=main_menu(user_id))
+                return
+            
+            task_name = task[0]
+            
             cursor.execute("DELETE FROM tasks WHERE id=?", (task_id,))
             cursor.execute("DELETE FROM user_tasks WHERE task_id=?", (task_id,))
             conn.commit()
-            bot.send_message(message.chat.id, f"✅ Task {task_id} deleted!", reply_markup=main_menu(user_id))
+            
+            bot.send_message(message.chat.id, f"✅ Task '{task_name}' (ID: {task_id}) deleted successfully!", 
+                            reply_markup=main_menu(user_id))
+            
+            if GITHUB_TOKEN and GITHUB_REPO:
+                threading.Thread(target=backup_to_github, args=("delete_task", f"Task deleted: {task_name}"), daemon=True).start()
         except:
-            bot.send_message(message.chat.id, "❌ Invalid ID", reply_markup=main_menu(user_id))
+            bot.send_message(message.chat.id, "❌ Invalid ID! Please enter a number.", reply_markup=main_menu(user_id))
 
 # ================= ADMIN DAILY BONUS =================
 def daily_admin_bonus():
