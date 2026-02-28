@@ -1081,17 +1081,15 @@ def show_tasks_callback(call):
     
     if not tasks:
         text = "📋 No tasks available at the moment."
-        bot.answer_callback_query(call.id, "No tasks available", show_alert=True)
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_menu(user_id))
         return
     
-    text = "📋 **AVAILABLE TASKS**\n\n"
+    text = "📋 **AVAILABLE TASKS**\n\nClick a task to complete it:\n\n"
     markup = InlineKeyboardMarkup()
     
     for task in tasks:
         task_id, task_name, reward = task
-        text += f"• **{task_name}** - `+{reward}⭐`\n"
-        markup.row(InlineKeyboardButton(f"✅ {task_name[:20]} - {reward}⭐", callback_data=f"do_task_{task_id}"))
+        markup.row(InlineKeyboardButton(f"✅ {task_name} - {reward}⭐", callback_data=f"do_task_{task_id}"))
     
     markup.row(InlineKeyboardButton("🔙 BACK", callback_data="back"))
     
@@ -1232,7 +1230,6 @@ def admin_panel_callback(call):
 📊 **STATISTICS**
 ━━━━━━━━━━━━━━━━━━━━━
 👥 Users: {users}
-💰 Total Stars: Coming soon
 📋 Active Tasks: {tasks}
 ⏳ Pending Withdrawals: {pending_withdrawals}
 👑 Pending Premium: {pending_premium}
