@@ -50,7 +50,7 @@ STAR_PACKAGES = {
 conn = sqlite3.connect("pulse_profit.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Create essential tables
+# Create all tables
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
@@ -79,7 +79,6 @@ CREATE TABLE IF NOT EXISTS referrals (
 )
 """)
 
-# Updated withdraw_requests table (no ID needed for approval, just user_id and amount)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS withdraw_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,7 +90,6 @@ CREATE TABLE IF NOT EXISTS withdraw_requests (
 )
 """)
 
-# New table for premium requests
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS premium_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,7 +130,6 @@ CREATE TABLE IF NOT EXISTS user_tasks (
 )
 """)
 
-# Updated redeem_codes table
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS redeem_codes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -152,8 +149,7 @@ CREATE TABLE IF NOT EXISTS redeemed_codes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code_id INTEGER,
     user_id INTEGER,
-    redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (code_id) REFERENCES redeem_codes(id)
+    redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
 
@@ -313,8 +309,6 @@ def reset_daily_withdrawals():
     cursor.execute("UPDATE users_wallet SET daily_withdrawn = 0")
     conn.commit()
     print("✅ Daily withdrawal limits reset")
-    if GITHUB_TOKEN and GITHUB_REPO:
-        threading.Thread(target=backup_to_github, args=("daily_reset", "Daily limits reset"), daemon=True).start()
 
 def generate_code():
     chars = string.ascii_uppercase + string.digits
@@ -542,7 +536,7 @@ Your link:
 """
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_menu(user_id))
 
-# ================= PREMIUM (Updated) =================
+# ================= PREMIUM WITH GUIDE =================
 @bot.callback_query_handler(func=lambda c: c.data == "premium")
 def premium_callback(call):
     user_id = call.from_user.id
@@ -553,7 +547,6 @@ def premium_callback(call):
         markup = InlineKeyboardMarkup()
         markup.row(InlineKeyboardButton("🔙 BACK", callback_data="back"))
     else:
-        # Check if user already has a pending request
         cursor.execute("SELECT id FROM premium_requests WHERE user_id=? AND status='pending'", (user_id,))
         existing_request = cursor.fetchone()
         
@@ -563,24 +556,40 @@ def premium_callback(call):
             markup.row(InlineKeyboardButton("🔙 BACK", callback_data="back"))
         else:
             text = f"""
-💎 PREMIUM MEMBERSHIP
+💎 PREMIUM MEMBERSHIP GUIDE
 
-Unlock premium benefits:
+Follow these steps to get premium access:
+
+━━━━━━━━━━━━━━━━━━━━━
+📝 **STEP 1:** Click "PURCHASE PREMIUM" below
+━━━━━━━━━━━━━━━━━━━━━
+• You'll be redirected to @MA5T3RBot
+• Purchase the premium package there
+
+━━━━━━━━━━━━━━━━━━━━━
+📝 **STEP 2:** After purchase, click "REQUEST APPROVAL"
+━━━━━━━━━━━━━━━━━━━━━
+• Your request will be sent to admins
+• You'll be notified when approved
+
+━━━━━━━━━━━━━━━━━━━━━
+✅ Once approved, you'll get:
 • Withdrawals enabled
 • Admin withdrawal requests
 • Higher earning potential
 • Priority support
-
-Click the button below to purchase premium or request admin approval.
+━━━━━━━━━━━━━━━━━━━━━
 """
             markup = InlineKeyboardMarkup()
             markup.row(
-                InlineKeyboardButton("💎 PURCHASE PREMIUM", url=PREMIUM_BOT_LINK),
+                InlineKeyboardButton("💎 PURCHASE PREMIUM", url=PREMIUM_BOT_LINK)
+            )
+            markup.row(
                 InlineKeyboardButton("📝 REQUEST APPROVAL", callback_data="request_premium")
             )
             markup.row(InlineKeyboardButton("🔙 BACK", callback_data="back"))
     
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
 # ================= REQUEST PREMIUM =================
 @bot.callback_query_handler(func=lambda c: c.data == "request_premium")
@@ -588,84 +597,175 @@ def request_premium_callback(call):
     user_id = call.from_user.id
     user_name = get_user_name(user_id)
     
-    # Check if request already exists
     cursor.execute("SELECT id FROM premium_requests WHERE user_id=? AND status='pending'", (user_id,))
     if cursor.fetchone():
         bot.answer_callback_query(call.id, "You already have a pending request!", show_alert=True)
         return
     
-    # Create premium request
     cursor.execute("INSERT INTO premium_requests (user_id) VALUES (?)", (user_id,))
     conn.commit()
     
-    # Notify admins
+    # Notify all admins
     for admin_id in ADMIN_IDS:
         try:
             admin_text = f"""
-🔔 NEW PREMIUM REQUEST
+🔔 **NEW PREMIUM REQUEST** 🔔
 
-👤 User: {user_name}
-🆔 ID: `{user_id}`
+━━━━━━━━━━━━━━━━━━━━━
+👤 **User:** {user_name}
+🆔 **ID:** `{user_id}`
+━━━━━━━━━━━━━━━━━━━━━
 
-Use:
-/approve_premium {user_id}
-/reject_premium {user_id}
+✅ **To APPROVE:**
+`/approve_premium {user_id}`
+
+❌ **To REJECT:**
+`/reject_premium {user_id}`
+━━━━━━━━━━━━━━━━━━━━━
 """
             bot.send_message(admin_id, admin_text, parse_mode="Markdown")
         except:
             pass
     
     bot.answer_callback_query(call.id, "✅ Request sent to admins!", show_alert=True)
-    text = "✅ Your premium request has been sent to admins for approval."
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_menu(user_id))
+    text = f"""
+✅ **PREMIUM REQUEST SENT**
+
+━━━━━━━━━━━━━━━━━━━━━
+Your request has been sent to the admins for approval.
+
+You will be notified once your request is processed.
+
+⏱️ **Estimated response time:** 5-30 minutes
+━━━━━━━━━━━━━━━━━━━━━
+"""
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_menu(user_id), parse_mode="Markdown")
 
 # ================= APPROVE PREMIUM COMMAND =================
 @bot.message_handler(commands=['approve_premium'])
 def approve_premium(message):
-    user_id = message.from_user.id
-    if not is_admin(user_id):
+    admin_id = message.from_user.id
+    if not is_admin(admin_id):
+        bot.reply_to(message, "❌ You are not authorized to use this command.")
         return
     
     try:
-        target_user = int(message.text.split()[1])
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "❌ Usage: /approve_premium [user_id]")
+            return
+        
+        target_user = int(parts[1])
+        admin_name = get_user_name(admin_id)
+        
+        # Check if request exists
+        cursor.execute("SELECT id FROM premium_requests WHERE user_id=? AND status='pending'", (target_user,))
+        request = cursor.fetchone()
+        
+        if not request:
+            bot.reply_to(message, f"❌ No pending premium request found for user {target_user}")
+            return
         
         # Update premium status
         cursor.execute("UPDATE users_wallet SET premium=1 WHERE user_id=?", (target_user,))
         cursor.execute("UPDATE premium_requests SET status='approved' WHERE user_id=? AND status='pending'", (target_user,))
         conn.commit()
         
-        bot.send_message(message.chat.id, f"✅ Premium approved for user {target_user}!")
+        # Notify admin
+        bot.reply_to(message, f"✅ Premium approved for user {target_user}!")
         
         # Notify user
         try:
-            bot.send_message(target_user, "✅ Your premium request has been approved! You now have premium access.")
+            user_text = f"""
+✅ **PREMIUM APPROVED!** ✅
+
+━━━━━━━━━━━━━━━━━━━━━
+Dear user,
+
+Your premium request has been **APPROVED** by an admin!
+
+━━━━━━━━━━━━━━━━━━━━━
+**You now have access to:**
+• Withdrawals enabled
+• Admin withdrawal requests
+• Higher earning potential
+• Priority support
+━━━━━━━━━━━━━━━━━━━━━
+
+Thank you for being a premium member! 🎉
+"""
+            bot.send_message(target_user, user_text, parse_mode="Markdown")
         except:
             pass
-    except:
-        bot.send_message(message.chat.id, "❌ Usage: /approve_premium [user_id]")
+        
+        # Log the action
+        if GITHUB_TOKEN and GITHUB_REPO:
+            threading.Thread(target=backup_to_github, args=("premium_approved", f"User {target_user} approved by admin {admin_id}"), daemon=True).start()
+            
+    except ValueError:
+        bot.reply_to(message, "❌ Invalid user ID format. Please provide a valid numeric ID.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
 
 # ================= REJECT PREMIUM COMMAND =================
 @bot.message_handler(commands=['reject_premium'])
 def reject_premium(message):
-    user_id = message.from_user.id
-    if not is_admin(user_id):
+    admin_id = message.from_user.id
+    if not is_admin(admin_id):
+        bot.reply_to(message, "❌ You are not authorized to use this command.")
         return
     
     try:
-        target_user = int(message.text.split()[1])
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, "❌ Usage: /reject_premium [user_id]")
+            return
         
+        target_user = int(parts[1])
+        admin_name = get_user_name(admin_id)
+        
+        # Check if request exists
+        cursor.execute("SELECT id FROM premium_requests WHERE user_id=? AND status='pending'", (target_user,))
+        request = cursor.fetchone()
+        
+        if not request:
+            bot.reply_to(message, f"❌ No pending premium request found for user {target_user}")
+            return
+        
+        # Update request status
         cursor.execute("UPDATE premium_requests SET status='rejected' WHERE user_id=? AND status='pending'", (target_user,))
         conn.commit()
         
-        bot.send_message(message.chat.id, f"❌ Premium rejected for user {target_user}!")
+        # Notify admin
+        bot.reply_to(message, f"❌ Premium rejected for user {target_user}!")
         
         # Notify user
         try:
-            bot.send_message(target_user, "❌ Your premium request has been rejected.")
+            user_text = f"""
+❌ **PREMIUM REQUEST REJECTED** ❌
+
+━━━━━━━━━━━━━━━━━━━━━
+Dear user,
+
+Your premium request has been **REJECTED** by an admin.
+
+━━━━━━━━━━━━━━━━━━━━━
+**Possible reasons:**
+• Purchase not verified
+• Insufficient payment
+• Technical issue
+
+━━━━━━━━━━━━━━━━━━━━━
+Please contact support if you believe this is an error.
+"""
+            bot.send_message(target_user, user_text, parse_mode="Markdown")
         except:
             pass
-    except:
-        bot.send_message(message.chat.id, "❌ Usage: /reject_premium [user_id]")
+        
+    except ValueError:
+        bot.reply_to(message, "❌ Invalid user ID format. Please provide a valid numeric ID.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
 
 # ================= BUY STARS =================
 @bot.callback_query_handler(func=lambda c: c.data == "buy_menu")
@@ -715,7 +815,7 @@ def redeem_menu_callback(call):
     conn.commit()
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
 
-# ================= WITHDRAWAL (Updated for admin approval) =================
+# ================= WITHDRAWAL =================
 @bot.callback_query_handler(func=lambda c: c.data == "withdraw_menu")
 def withdraw_menu_callback(call):
     user_id = call.from_user.id
@@ -808,7 +908,6 @@ def withdraw_admin_menu_callback(call):
     user_id = call.from_user.id
     wallet = get_wallet(user_id)
     
-    # Check premium for non-admins
     if not is_admin(user_id) and wallet[4] == 0:
         bot.answer_callback_query(call.id, "❌ Premium required!", show_alert=True)
         return
@@ -855,12 +954,10 @@ def withdraw_admin_amount_callback(call):
         bot.answer_callback_query(call.id, "❌ Daily limit exceeded!", show_alert=True)
         return
     
-    # Create withdrawal request
     cursor.execute("INSERT INTO withdraw_requests (user_id, amount, withdrawal_type) VALUES (?,?,'admin')", (user_id, amount))
     cursor.execute("UPDATE users_wallet SET daily_withdrawn = daily_withdrawn + ? WHERE user_id=?", (amount, user_id))
     conn.commit()
     
-    # Notify admins
     user_name = get_user_name(user_id)
     for admin_id in ADMIN_IDS:
         try:
@@ -888,14 +985,18 @@ Use:
 def approve_withdraw(message):
     admin_id = message.from_user.id
     if not is_admin(admin_id):
+        bot.reply_to(message, "❌ You are not authorized to use this command.")
         return
     
     try:
         parts = message.text.split()
+        if len(parts) < 3:
+            bot.reply_to(message, "❌ Usage: /approve_withdraw [user_id] [amount]")
+            return
+        
         target_user = int(parts[1])
         amount = int(parts[2])
         
-        # Find the pending request
         cursor.execute("""
             SELECT id FROM withdraw_requests 
             WHERE user_id=? AND amount=? AND status='pending' AND withdrawal_type='admin'
@@ -904,62 +1005,66 @@ def approve_withdraw(message):
         req = cursor.fetchone()
         
         if not req:
-            bot.send_message(message.chat.id, "❌ No pending request found!")
+            bot.reply_to(message, "❌ No pending request found!")
             return
         
         req_id = req[0]
         
-        # Update request status
         cursor.execute("UPDATE withdraw_requests SET status='approved' WHERE id=?", (req_id,))
-        
-        # Deduct stars (already deducted when request was created? Let's check)
-        # Actually stars are not deducted until approval for admin withdrawals
-        # Let's deduct them now
         cursor.execute("UPDATE users_wallet SET stars = stars - ? WHERE user_id=?", (amount, target_user))
         conn.commit()
         
-        bot.send_message(message.chat.id, f"✅ Withdrawal approved for user {target_user} (Amount: {amount}⭐)")
+        bot.reply_to(message, f"✅ Withdrawal approved for user {target_user} (Amount: {amount}⭐)")
         
-        # Notify user
         try:
             bot.send_message(target_user, f"✅ Your admin withdrawal of {amount}⭐ has been approved!")
         except:
             pass
-    except:
-        bot.send_message(message.chat.id, "❌ Usage: /approve_withdraw [user_id] [amount]")
+    except ValueError:
+        bot.reply_to(message, "❌ Invalid user ID or amount format.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
 
 # ================= REJECT WITHDRAWAL COMMAND =================
 @bot.message_handler(commands=['reject_withdraw'])
 def reject_withdraw(message):
     admin_id = message.from_user.id
     if not is_admin(admin_id):
+        bot.reply_to(message, "❌ You are not authorized to use this command.")
         return
     
     try:
         parts = message.text.split()
+        if len(parts) < 3:
+            bot.reply_to(message, "❌ Usage: /reject_withdraw [user_id] [amount]")
+            return
+        
         target_user = int(parts[1])
         amount = int(parts[2])
         
-        # Find and reject the request
         cursor.execute("""
             UPDATE withdraw_requests SET status='rejected' 
             WHERE user_id=? AND amount=? AND status='pending' AND withdrawal_type='admin'
         """, (target_user, amount))
-        conn.commit()
+        
+        if cursor.rowcount == 0:
+            bot.reply_to(message, "❌ No pending request found!")
+            return
         
         # Refund daily withdrawal limit
         cursor.execute("UPDATE users_wallet SET daily_withdrawn = daily_withdrawn - ? WHERE user_id=?", (amount, target_user))
         conn.commit()
         
-        bot.send_message(message.chat.id, f"❌ Withdrawal rejected for user {target_user}")
+        bot.reply_to(message, f"❌ Withdrawal rejected for user {target_user}")
         
-        # Notify user
         try:
             bot.send_message(target_user, f"❌ Your admin withdrawal of {amount}⭐ has been rejected.")
         except:
             pass
-    except:
-        bot.send_message(message.chat.id, "❌ Usage: /reject_withdraw [user_id] [amount]")
+    except ValueError:
+        bot.reply_to(message, "❌ Invalid user ID or amount format.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
 
 # ================= BACK BUTTON =================
 @bot.callback_query_handler(func=lambda c: c.data == "back")
@@ -1101,15 +1206,15 @@ def admin_premium_callback(call):
     if pending:
         for req in pending:
             name = req[2] or f"User {req[1]}"
-            text += f"ID: {req[0]} - {name} - {req[3][:16]}\n"
-            text += f"Approve: /approve_premium {req[1]}\n"
-            text += f"Reject: /reject_premium {req[1]}\n\n"
+            text += f"• {name} (ID: {req[1]}) - {req[3][:16]}\n"
+            text += f"  Approve: `/approve_premium {req[1]}`\n"
+            text += f"  Reject: `/reject_premium {req[1]}`\n\n"
     else:
         text += "No pending requests.\n"
     
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton("🔙 BACK", callback_data="admin_panel"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
 # ================= ADMIN TASKS =================
 @bot.callback_query_handler(func=lambda c: c.data == "admin_tasks")
@@ -1244,15 +1349,15 @@ def admin_withdrawals_callback(call):
     if pending:
         for p in pending:
             name = get_user_name(p[1])
-            text += f"ID: {p[0]} - {name} - {p[2]}⭐ - {p[3][:16]}\n"
-            text += f"Approve: /approve_withdraw {p[1]} {p[2]}\n"
-            text += f"Reject: /reject_withdraw {p[1]} {p[2]}\n\n"
+            text += f"• {name} (ID: {p[1]}) - {p[2]}⭐ - {p[3][:16]}\n"
+            text += f"  Approve: `/approve_withdraw {p[1]} {p[2]}`\n"
+            text += f"  Reject: `/reject_withdraw {p[1]} {p[2]}`\n\n"
     else:
         text += "None\n"
     
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton("🔙 BACK", callback_data="admin_panel"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
 # ================= ADMIN VERIFY =================
 @bot.callback_query_handler(func=lambda c: c.data == "admin_verify")
@@ -1274,7 +1379,7 @@ def admin_verify_callback(call):
         for p in pending:
             name = get_user_name(p[1])
             text += f"ID:{p[0]} - {name} - {p[2][:15]} - {p[3]}⭐\n"
-            text += f"Verify: /verify_task {p[1]} {p[2]}\n\n"
+            text += f"Verify: `/verify_task {p[1]} {p[2]}`\n\n"
     else:
         text += "None\n"
     
@@ -1374,14 +1479,18 @@ def admin_backup_now_callback(call):
 def verify_task_command(message):
     admin_id = message.from_user.id
     if not is_admin(admin_id):
+        bot.reply_to(message, "❌ You are not authorized to use this command.")
         return
     
     try:
         parts = message.text.split()
+        if len(parts) < 3:
+            bot.reply_to(message, "❌ Usage: /verify_task [user_id] [task_name]")
+            return
+        
         target_user = int(parts[1])
         task_name = ' '.join(parts[2:])
         
-        # Find the pending task
         cursor.execute("""
             SELECT ut.id, t.reward FROM user_tasks ut
             JOIN tasks t ON ut.task_id = t.id
@@ -1391,7 +1500,7 @@ def verify_task_command(message):
         task = cursor.fetchone()
         
         if not task:
-            bot.send_message(message.chat.id, "❌ No pending task found!")
+            bot.reply_to(message, "❌ No pending task found!")
             return
         
         task_id, reward = task
@@ -1400,14 +1509,16 @@ def verify_task_command(message):
         add_stars(target_user, reward)
         conn.commit()
         
-        bot.send_message(message.chat.id, f"✅ Task verified! User got {reward}⭐")
+        bot.reply_to(message, f"✅ Task verified! User got {reward}⭐")
         
         try:
             bot.send_message(target_user, f"✅ Your task has been verified! +{reward}⭐")
         except:
             pass
-    except:
-        bot.send_message(message.chat.id, "❌ Usage: /verify_task [user_id] [task_name]")
+    except ValueError:
+        bot.reply_to(message, "❌ Invalid user ID format.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {str(e)}")
 
 # ================= HANDLE ALL TEXT MESSAGES =================
 @bot.message_handler(func=lambda message: True)
@@ -1520,7 +1631,6 @@ def handle_all_messages(message):
             cursor.execute("UPDATE users_wallet SET daily_withdrawn = daily_withdrawn + ? WHERE user_id=?", (amount, user_id))
             conn.commit()
             
-            # Notify admins
             user_name = get_user_name(user_id)
             for admin_id in ADMIN_IDS:
                 try:
@@ -1594,10 +1704,8 @@ Use:
             amount = session["amount"]
             expiry_days = session["expiry_days"]
             
-            # Generate code
             code = generate_code()
             
-            # Set expiry
             expires_at = None
             if expiry_days > 0:
                 expires_at = datetime.now() + timedelta(days=expiry_days)
@@ -1625,7 +1733,7 @@ Use:
         except:
             bot.send_message(message.chat.id, "❌ Invalid number!", reply_markup=main_menu(user_id))
     
-    # Handle task creation
+    # Handle task creation - name
     elif action_type == "add_task_name":
         cursor.execute("INSERT OR REPLACE INTO admin_sessions (admin_id, session_data) VALUES (?,?)", 
                       (user_id, json.dumps({"name": text})))
@@ -1642,6 +1750,7 @@ Use:
         )
         bot.send_message(message.chat.id, "Choose task type:", reply_markup=markup)
     
+    # Handle task creation - data
     elif action_type == "add_task_data":
         data = cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,)).fetchone()
         if not data:
@@ -1654,6 +1763,7 @@ Use:
         conn.commit()
         bot.send_message(message.chat.id, "💰 Enter reward amount:")
     
+    # Handle task creation - reward
     elif action_type == "add_task_reward":
         try:
             reward = int(text)
