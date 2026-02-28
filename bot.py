@@ -29,6 +29,9 @@ ADMIN_IDS = [7475473197, 7713987088]  # Replace with your admin IDs
 REQUIRED_CHANNEL = "@PulseProfit012"
 CHANNEL_LINK = "https://t.me/PulseProfit012"
 
+# ================= PREMIUM BOT LINK =================
+PREMIUM_BOT_LINK = "https://t.me/MA5T3RBot"
+
 # ================= SETTINGS =================
 COOLDOWN_TIME = 60
 WITHDRAWAL_COOLDOWN = 3600
@@ -76,12 +79,23 @@ CREATE TABLE IF NOT EXISTS referrals (
 )
 """)
 
+# Updated withdraw_requests table (no ID needed for approval, just user_id and amount)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS withdraw_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
     amount INTEGER,
     withdrawal_type TEXT DEFAULT 'admin',
+    status TEXT DEFAULT 'pending',
+    request_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+# New table for premium requests
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS premium_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
     status TEXT DEFAULT 'pending',
     request_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
@@ -118,14 +132,18 @@ CREATE TABLE IF NOT EXISTS user_tasks (
 )
 """)
 
+# Updated redeem_codes table
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS redeem_codes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT UNIQUE,
     amount INTEGER,
+    max_uses INTEGER DEFAULT 1,
+    used_count INTEGER DEFAULT 0,
+    expires_at TIMESTAMP,
     created_by INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    used INTEGER DEFAULT 0
+    active INTEGER DEFAULT 1
 )
 """)
 
@@ -134,7 +152,8 @@ CREATE TABLE IF NOT EXISTS redeemed_codes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code_id INTEGER,
     user_id INTEGER,
-    redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (code_id) REFERENCES redeem_codes(id)
 )
 """)
 
@@ -296,6 +315,11 @@ def reset_daily_withdrawals():
     print("✅ Daily withdrawal limits reset")
     if GITHUB_TOKEN and GITHUB_REPO:
         threading.Thread(target=backup_to_github, args=("daily_reset", "Daily limits reset"), daemon=True).start()
+
+def generate_code():
+    chars = string.ascii_uppercase + string.digits
+    code = ''.join(random.choices(chars, k=8))
+    return f"{code[:4]}-{code[4:]}"
 
 # ================= AUTO WITHDRAWAL PROCESSOR =================
 def process_withdrawals():
@@ -518,7 +542,7 @@ Your link:
 """
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_menu(user_id))
 
-# ================= PREMIUM =================
+# ================= PREMIUM (Updated) =================
 @bot.callback_query_handler(func=lambda c: c.data == "premium")
 def premium_callback(call):
     user_id = call.from_user.id
@@ -526,14 +550,122 @@ def premium_callback(call):
     
     if wallet[4] == 1:
         text = "💎 PREMIUM ACTIVE\n\nYou have premium access!"
+        markup = InlineKeyboardMarkup()
+        markup.row(InlineKeyboardButton("🔙 BACK", callback_data="back"))
     else:
-        text = "💎 PREMIUM\n\nGet premium to unlock:\n• Withdrawals\n• Admin requests\n• More rewards"
-    
-    markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton("💎 GET PREMIUM", url="https://t.me/MA5T3RBot"))
-    markup.row(InlineKeyboardButton("🔙 BACK", callback_data="back"))
+        # Check if user already has a pending request
+        cursor.execute("SELECT id FROM premium_requests WHERE user_id=? AND status='pending'", (user_id,))
+        existing_request = cursor.fetchone()
+        
+        if existing_request:
+            text = "⏳ Your premium request is pending admin approval."
+            markup = InlineKeyboardMarkup()
+            markup.row(InlineKeyboardButton("🔙 BACK", callback_data="back"))
+        else:
+            text = f"""
+💎 PREMIUM MEMBERSHIP
+
+Unlock premium benefits:
+• Withdrawals enabled
+• Admin withdrawal requests
+• Higher earning potential
+• Priority support
+
+Click the button below to purchase premium or request admin approval.
+"""
+            markup = InlineKeyboardMarkup()
+            markup.row(
+                InlineKeyboardButton("💎 PURCHASE PREMIUM", url=PREMIUM_BOT_LINK),
+                InlineKeyboardButton("📝 REQUEST APPROVAL", callback_data="request_premium")
+            )
+            markup.row(InlineKeyboardButton("🔙 BACK", callback_data="back"))
     
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+# ================= REQUEST PREMIUM =================
+@bot.callback_query_handler(func=lambda c: c.data == "request_premium")
+def request_premium_callback(call):
+    user_id = call.from_user.id
+    user_name = get_user_name(user_id)
+    
+    # Check if request already exists
+    cursor.execute("SELECT id FROM premium_requests WHERE user_id=? AND status='pending'", (user_id,))
+    if cursor.fetchone():
+        bot.answer_callback_query(call.id, "You already have a pending request!", show_alert=True)
+        return
+    
+    # Create premium request
+    cursor.execute("INSERT INTO premium_requests (user_id) VALUES (?)", (user_id,))
+    conn.commit()
+    
+    # Notify admins
+    for admin_id in ADMIN_IDS:
+        try:
+            admin_text = f"""
+🔔 NEW PREMIUM REQUEST
+
+👤 User: {user_name}
+🆔 ID: `{user_id}`
+
+Use:
+/approve_premium {user_id}
+/reject_premium {user_id}
+"""
+            bot.send_message(admin_id, admin_text, parse_mode="Markdown")
+        except:
+            pass
+    
+    bot.answer_callback_query(call.id, "✅ Request sent to admins!", show_alert=True)
+    text = "✅ Your premium request has been sent to admins for approval."
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=main_menu(user_id))
+
+# ================= APPROVE PREMIUM COMMAND =================
+@bot.message_handler(commands=['approve_premium'])
+def approve_premium(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    try:
+        target_user = int(message.text.split()[1])
+        
+        # Update premium status
+        cursor.execute("UPDATE users_wallet SET premium=1 WHERE user_id=?", (target_user,))
+        cursor.execute("UPDATE premium_requests SET status='approved' WHERE user_id=? AND status='pending'", (target_user,))
+        conn.commit()
+        
+        bot.send_message(message.chat.id, f"✅ Premium approved for user {target_user}!")
+        
+        # Notify user
+        try:
+            bot.send_message(target_user, "✅ Your premium request has been approved! You now have premium access.")
+        except:
+            pass
+    except:
+        bot.send_message(message.chat.id, "❌ Usage: /approve_premium [user_id]")
+
+# ================= REJECT PREMIUM COMMAND =================
+@bot.message_handler(commands=['reject_premium'])
+def reject_premium(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    try:
+        target_user = int(message.text.split()[1])
+        
+        cursor.execute("UPDATE premium_requests SET status='rejected' WHERE user_id=? AND status='pending'", (target_user,))
+        conn.commit()
+        
+        bot.send_message(message.chat.id, f"❌ Premium rejected for user {target_user}!")
+        
+        # Notify user
+        try:
+            bot.send_message(target_user, "❌ Your premium request has been rejected.")
+        except:
+            pass
+    except:
+        bot.send_message(message.chat.id, "❌ Usage: /reject_premium [user_id]")
 
 # ================= BUY STARS =================
 @bot.callback_query_handler(func=lambda c: c.data == "buy_menu")
@@ -583,7 +715,7 @@ def redeem_menu_callback(call):
     conn.commit()
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
 
-# ================= WITHDRAWAL =================
+# ================= WITHDRAWAL (Updated for admin approval) =================
 @bot.callback_query_handler(func=lambda c: c.data == "withdraw_menu")
 def withdraw_menu_callback(call):
     user_id = call.from_user.id
@@ -595,17 +727,20 @@ def withdraw_menu_callback(call):
 Balance: {wallet[1]} 🟡⭐
 Daily: {wallet[6]}/{MAX_DAILY_WITHDRAW}
 
-⭐ Stars Withdrawal (1:1)
+⭐ Stars Withdrawal (1:1) - Automatic
 Minimum: {MIN_WITHDRAW}
+
+💼 Admin Withdrawal - Manual approval
 """
     markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton("⭐ WITHDRAW STARS", callback_data="withdraw_stars"))
+    markup.row(InlineKeyboardButton("⭐ AUTO WITHDRAW", callback_data="withdraw_stars"))
     if wallet[4] == 1 or is_admin(user_id):
-        markup.row(InlineKeyboardButton("💼 ADMIN REQUEST", callback_data="withdraw_admin"))
+        markup.row(InlineKeyboardButton("💼 ADMIN WITHDRAW", callback_data="withdraw_admin_menu"))
     markup.row(InlineKeyboardButton("🔙 BACK", callback_data="back"))
     
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
 
+# ===== AUTO WITHDRAW (Stars) =====
 @bot.callback_query_handler(func=lambda c: c.data == "withdraw_stars")
 def withdraw_stars_callback(call):
     user_id = call.from_user.id
@@ -626,20 +761,27 @@ def withdraw_stars_callback(call):
     row = []
     for amt in presets:
         if amt <= wallet[1]:
-            row.append(InlineKeyboardButton(f"{amt}", callback_data=f"withdraw_amt_{amt}"))
+            row.append(InlineKeyboardButton(f"{amt}", callback_data=f"withdraw_auto_{amt}"))
             if len(row) == 2:
                 markup.row(*row)
                 row = []
     if row:
         markup.row(*row)
-    markup.row(InlineKeyboardButton("✏️ CUSTOM", callback_data="withdraw_custom"))
+    markup.row(InlineKeyboardButton("✏️ CUSTOM", callback_data="withdraw_auto_custom"))
     markup.row(InlineKeyboardButton("🔙 BACK", callback_data="withdraw_menu"))
     
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("withdraw_amt_"))
-def withdraw_amt_callback(call):
-    amount = int(call.data.replace("withdraw_amt_", ""))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("withdraw_auto_"))
+def withdraw_auto_amount_callback(call):
+    if call.data == "withdraw_auto_custom":
+        user_id = call.from_user.id
+        cursor.execute("INSERT OR REPLACE INTO user_actions (user_id, action_type) VALUES (?,?)", (user_id, "awaiting_auto_withdraw"))
+        conn.commit()
+        bot.edit_message_text("💰 Enter amount:", call.message.chat.id, call.message.message_id)
+        return
+    
+    amount = int(call.data.replace("withdraw_auto_", ""))
     user_id = call.from_user.id
     wallet = get_wallet(user_id)
     
@@ -657,28 +799,167 @@ def withdraw_amt_callback(call):
     conn.commit()
     
     bot.answer_callback_query(call.id, f"✅ Requested {amount} ⭐️")
-    bot.edit_message_text(f"✅ Withdrawal requested! {amount} ⭐️ will be sent soon.",
+    bot.edit_message_text(f"✅ Auto withdrawal requested! {amount} ⭐️ will be sent soon.",
                          call.message.chat.id, call.message.message_id, reply_markup=main_menu(user_id))
 
-@bot.callback_query_handler(func=lambda c: c.data == "withdraw_custom")
-def withdraw_custom_callback(call):
-    user_id = call.from_user.id
-    cursor.execute("INSERT OR REPLACE INTO user_actions (user_id, action_type) VALUES (?,?)", (user_id, "awaiting_withdraw"))
-    conn.commit()
-    bot.edit_message_text("💰 Enter amount:", call.message.chat.id, call.message.message_id)
-
-@bot.callback_query_handler(func=lambda c: c.data == "withdraw_admin")
-def withdraw_admin_callback(call):
+# ===== ADMIN WITHDRAW (Manual approval) =====
+@bot.callback_query_handler(func=lambda c: c.data == "withdraw_admin_menu")
+def withdraw_admin_menu_callback(call):
     user_id = call.from_user.id
     wallet = get_wallet(user_id)
     
+    # Check premium for non-admins
     if not is_admin(user_id) and wallet[4] == 0:
         bot.answer_callback_query(call.id, "❌ Premium required!", show_alert=True)
         return
     
-    cursor.execute("INSERT OR REPLACE INTO user_actions (user_id, action_type) VALUES (?,?)", (user_id, "awaiting_withdraw"))
+    if wallet[1] < MIN_WITHDRAW:
+        bot.answer_callback_query(call.id, f"❌ Need {MIN_WITHDRAW} 🟡⭐", show_alert=True)
+        return
+    
+    presets = [50, 100, 200, 500]
+    text = f"💼 Choose amount for admin approval (balance: {wallet[1]} 🟡⭐):"
+    markup = InlineKeyboardMarkup()
+    row = []
+    for amt in presets:
+        if amt <= wallet[1]:
+            row.append(InlineKeyboardButton(f"{amt}", callback_data=f"withdraw_admin_{amt}"))
+            if len(row) == 2:
+                markup.row(*row)
+                row = []
+    if row:
+        markup.row(*row)
+    markup.row(InlineKeyboardButton("✏️ CUSTOM", callback_data="withdraw_admin_custom"))
+    markup.row(InlineKeyboardButton("🔙 BACK", callback_data="withdraw_menu"))
+    
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("withdraw_admin_"))
+def withdraw_admin_amount_callback(call):
+    if call.data == "withdraw_admin_custom":
+        user_id = call.from_user.id
+        cursor.execute("INSERT OR REPLACE INTO user_actions (user_id, action_type) VALUES (?,?)", (user_id, "awaiting_admin_withdraw"))
+        conn.commit()
+        bot.edit_message_text("💰 Enter amount for admin approval:", call.message.chat.id, call.message.message_id)
+        return
+    
+    amount = int(call.data.replace("withdraw_admin_", ""))
+    user_id = call.from_user.id
+    wallet = get_wallet(user_id)
+    
+    if amount > wallet[1]:
+        bot.answer_callback_query(call.id, "❌ Insufficient balance!", show_alert=True)
+        return
+    
+    if not is_admin(user_id) and wallet[6] + amount > MAX_DAILY_WITHDRAW:
+        bot.answer_callback_query(call.id, "❌ Daily limit exceeded!", show_alert=True)
+        return
+    
+    # Create withdrawal request
+    cursor.execute("INSERT INTO withdraw_requests (user_id, amount, withdrawal_type) VALUES (?,?,'admin')", (user_id, amount))
+    cursor.execute("UPDATE users_wallet SET daily_withdrawn = daily_withdrawn + ? WHERE user_id=?", (amount, user_id))
     conn.commit()
-    bot.edit_message_text("💰 Enter amount for admin withdrawal:", call.message.chat.id, call.message.message_id)
+    
+    # Notify admins
+    user_name = get_user_name(user_id)
+    for admin_id in ADMIN_IDS:
+        try:
+            admin_text = f"""
+🔔 NEW ADMIN WITHDRAWAL REQUEST
+
+👤 User: {user_name}
+🆔 ID: `{user_id}`
+💰 Amount: {amount} 🟡⭐
+
+Use:
+/approve_withdraw {user_id} {amount}
+/reject_withdraw {user_id} {amount}
+"""
+            bot.send_message(admin_id, admin_text, parse_mode="Markdown")
+        except:
+            pass
+    
+    bot.answer_callback_query(call.id, f"✅ Requested {amount} ⭐️ for admin approval")
+    bot.edit_message_text(f"✅ Admin withdrawal requested! {amount} ⭐️ is pending admin approval.",
+                         call.message.chat.id, call.message.message_id, reply_markup=main_menu(user_id))
+
+# ================= APPROVE WITHDRAWAL COMMAND =================
+@bot.message_handler(commands=['approve_withdraw'])
+def approve_withdraw(message):
+    admin_id = message.from_user.id
+    if not is_admin(admin_id):
+        return
+    
+    try:
+        parts = message.text.split()
+        target_user = int(parts[1])
+        amount = int(parts[2])
+        
+        # Find the pending request
+        cursor.execute("""
+            SELECT id FROM withdraw_requests 
+            WHERE user_id=? AND amount=? AND status='pending' AND withdrawal_type='admin'
+            ORDER BY request_time DESC LIMIT 1
+        """, (target_user, amount))
+        req = cursor.fetchone()
+        
+        if not req:
+            bot.send_message(message.chat.id, "❌ No pending request found!")
+            return
+        
+        req_id = req[0]
+        
+        # Update request status
+        cursor.execute("UPDATE withdraw_requests SET status='approved' WHERE id=?", (req_id,))
+        
+        # Deduct stars (already deducted when request was created? Let's check)
+        # Actually stars are not deducted until approval for admin withdrawals
+        # Let's deduct them now
+        cursor.execute("UPDATE users_wallet SET stars = stars - ? WHERE user_id=?", (amount, target_user))
+        conn.commit()
+        
+        bot.send_message(message.chat.id, f"✅ Withdrawal approved for user {target_user} (Amount: {amount}⭐)")
+        
+        # Notify user
+        try:
+            bot.send_message(target_user, f"✅ Your admin withdrawal of {amount}⭐ has been approved!")
+        except:
+            pass
+    except:
+        bot.send_message(message.chat.id, "❌ Usage: /approve_withdraw [user_id] [amount]")
+
+# ================= REJECT WITHDRAWAL COMMAND =================
+@bot.message_handler(commands=['reject_withdraw'])
+def reject_withdraw(message):
+    admin_id = message.from_user.id
+    if not is_admin(admin_id):
+        return
+    
+    try:
+        parts = message.text.split()
+        target_user = int(parts[1])
+        amount = int(parts[2])
+        
+        # Find and reject the request
+        cursor.execute("""
+            UPDATE withdraw_requests SET status='rejected' 
+            WHERE user_id=? AND amount=? AND status='pending' AND withdrawal_type='admin'
+        """, (target_user, amount))
+        conn.commit()
+        
+        # Refund daily withdrawal limit
+        cursor.execute("UPDATE users_wallet SET daily_withdrawn = daily_withdrawn - ? WHERE user_id=?", (amount, target_user))
+        conn.commit()
+        
+        bot.send_message(message.chat.id, f"❌ Withdrawal rejected for user {target_user}")
+        
+        # Notify user
+        try:
+            bot.send_message(target_user, f"❌ Your admin withdrawal of {amount}⭐ has been rejected.")
+        except:
+            pass
+    except:
+        bot.send_message(message.chat.id, "❌ Usage: /reject_withdraw [user_id] [amount]")
 
 # ================= BACK BUTTON =================
 @bot.callback_query_handler(func=lambda c: c.data == "back")
@@ -764,7 +1045,9 @@ def admin_panel_callback(call):
     cursor.execute("SELECT COUNT(*) FROM tasks WHERE active=1")
     tasks = cursor.fetchone()[0]
     cursor.execute("SELECT COUNT(*) FROM withdraw_requests WHERE status='pending'")
-    pending = cursor.fetchone()[0]
+    pending_withdrawals = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM premium_requests WHERE status='pending'")
+    pending_premium = cursor.fetchone()[0]
     cursor.execute("SELECT COUNT(*) FROM user_tasks WHERE verified=0")
     verify = cursor.fetchone()[0]
     
@@ -773,7 +1056,8 @@ def admin_panel_callback(call):
 
 Users: {users}
 Active Tasks: {tasks}
-Pending Withdrawals: {pending}
+Pending Withdrawals: {pending_withdrawals}
+Pending Premium: {pending_premium}
 Pending Verifications: {verify}
 
 Choose option:
@@ -785,15 +1069,46 @@ Choose option:
     )
     markup.row(
         InlineKeyboardButton("💳 WITHDRAWALS", callback_data="admin_withdrawals"),
-        InlineKeyboardButton("🔍 VERIFY", callback_data="admin_verify")
+        InlineKeyboardButton("👑 PREMIUM", callback_data="admin_premium")
     )
     markup.row(
-        InlineKeyboardButton("📊 STATS", callback_data="admin_stats"),
-        InlineKeyboardButton("💾 BACKUP", callback_data="admin_backup")
+        InlineKeyboardButton("🔍 VERIFY", callback_data="admin_verify"),
+        InlineKeyboardButton("📊 STATS", callback_data="admin_stats")
     )
     markup.row(
+        InlineKeyboardButton("💾 BACKUP", callback_data="admin_backup"),
         InlineKeyboardButton("🔙 BACK", callback_data="back")
     )
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+# ================= ADMIN PREMIUM REQUESTS =================
+@bot.callback_query_handler(func=lambda c: c.data == "admin_premium")
+def admin_premium_callback(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        return
+    
+    cursor.execute("""
+        SELECT pr.id, pr.user_id, u.first_name, pr.request_time 
+        FROM premium_requests pr
+        LEFT JOIN users u ON pr.user_id = u.user_id
+        WHERE pr.status='pending'
+        ORDER BY pr.request_time ASC
+    """)
+    pending = cursor.fetchall()
+    
+    text = "👑 PENDING PREMIUM REQUESTS\n\n"
+    if pending:
+        for req in pending:
+            name = req[2] or f"User {req[1]}"
+            text += f"ID: {req[0]} - {name} - {req[3][:16]}\n"
+            text += f"Approve: /approve_premium {req[1]}\n"
+            text += f"Reject: /reject_premium {req[1]}\n\n"
+    else:
+        text += "No pending requests.\n"
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("🔙 BACK", callback_data="admin_panel"))
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 # ================= ADMIN TASKS =================
@@ -881,14 +1196,15 @@ def admin_codes_callback(call):
     if not is_admin(user_id):
         return
     
-    cursor.execute("SELECT id, code, amount, used FROM redeem_codes ORDER BY id DESC LIMIT 10")
+    cursor.execute("SELECT id, code, amount, max_uses, used_count, expires_at, active FROM redeem_codes ORDER BY id DESC LIMIT 10")
     codes = cursor.fetchall()
     
     text = "🎫 REDEEM CODES\n\n"
     if codes:
         for c in codes:
-            status = "✅" if c[3] else "🔄"
-            text += f"{status} {c[1]} - {c[2]}⭐\n"
+            status = "✅" if c[6] else "❌"
+            expires = c[5][:10] if c[5] else "Never"
+            text += f"{status} {c[1]} - {c[2]}⭐ - Used: {c[4]}/{c[3]} - Exp: {expires}\n"
     else:
         text += "No codes yet.\n"
     
@@ -905,7 +1221,7 @@ def admin_create_code_callback(call):
         return
     
     text = "➕ CREATE CODE\n\nEnter amount:"
-    cursor.execute("INSERT OR REPLACE INTO user_actions (user_id, action_type) VALUES (?,?)", (user_id, "create_code"))
+    cursor.execute("INSERT OR REPLACE INTO user_actions (user_id, action_type) VALUES (?,?)", (user_id, "create_code_amount"))
     conn.commit()
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
 
@@ -916,32 +1232,27 @@ def admin_withdrawals_callback(call):
     if not is_admin(user_id):
         return
     
-    cursor.execute("SELECT id, user_id, amount, request_time FROM withdraw_requests WHERE status='pending'")
+    cursor.execute("""
+        SELECT id, user_id, amount, request_time 
+        FROM withdraw_requests 
+        WHERE status='pending' AND withdrawal_type='admin'
+        ORDER BY request_time ASC
+    """)
     pending = cursor.fetchall()
     
-    text = "💳 PENDING WITHDRAWALS\n\n"
+    text = "💳 PENDING ADMIN WITHDRAWALS\n\n"
     if pending:
         for p in pending:
             name = get_user_name(p[1])
-            text += f"ID:{p[0]} - {name[:15]} - {p[2]}⭐ - {p[3][:16]}\n"
+            text += f"ID: {p[0]} - {name} - {p[2]}⭐ - {p[3][:16]}\n"
+            text += f"Approve: /approve_withdraw {p[1]} {p[2]}\n"
+            text += f"Reject: /reject_withdraw {p[1]} {p[2]}\n\n"
     else:
         text += "None\n"
     
     markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton("✅ APPROVE", callback_data="admin_approve_withdraw"))
     markup.row(InlineKeyboardButton("🔙 BACK", callback_data="admin_panel"))
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda c: c.data == "admin_approve_withdraw")
-def admin_approve_withdraw_callback(call):
-    user_id = call.from_user.id
-    if not is_admin(user_id):
-        return
-    
-    text = "Enter withdrawal ID to approve:"
-    cursor.execute("INSERT OR REPLACE INTO user_actions (user_id, action_type) VALUES (?,?)", (user_id, "approve_withdraw"))
-    conn.commit()
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
 
 # ================= ADMIN VERIFY =================
 @bot.callback_query_handler(func=lambda c: c.data == "admin_verify")
@@ -962,25 +1273,14 @@ def admin_verify_callback(call):
     if pending:
         for p in pending:
             name = get_user_name(p[1])
-            text += f"ID:{p[0]} - {name[:15]} - {p[2][:15]} - {p[3]}⭐\n"
+            text += f"ID:{p[0]} - {name} - {p[2][:15]} - {p[3]}⭐\n"
+            text += f"Verify: /verify_task {p[1]} {p[2]}\n\n"
     else:
         text += "None\n"
     
     markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton("✅ VERIFY", callback_data="admin_verify_action"))
     markup.row(InlineKeyboardButton("🔙 BACK", callback_data="admin_panel"))
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda c: c.data == "admin_verify_action")
-def admin_verify_action_callback(call):
-    user_id = call.from_user.id
-    if not is_admin(user_id):
-        return
-    
-    text = "Enter verification ID:"
-    cursor.execute("INSERT OR REPLACE INTO user_actions (user_id, action_type) VALUES (?,?)", (user_id, "verify_id"))
-    conn.commit()
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
 
 # ================= ADMIN STATS =================
 @bot.callback_query_handler(func=lambda c: c.data == "admin_stats")
@@ -1069,6 +1369,46 @@ def admin_backup_now_callback(call):
     else:
         bot.send_message(call.message.chat.id, "❌ Backup failed!")
 
+# ================= VERIFY TASK COMMAND =================
+@bot.message_handler(commands=['verify_task'])
+def verify_task_command(message):
+    admin_id = message.from_user.id
+    if not is_admin(admin_id):
+        return
+    
+    try:
+        parts = message.text.split()
+        target_user = int(parts[1])
+        task_name = ' '.join(parts[2:])
+        
+        # Find the pending task
+        cursor.execute("""
+            SELECT ut.id, t.reward FROM user_tasks ut
+            JOIN tasks t ON ut.task_id = t.id
+            WHERE ut.user_id=? AND t.task_name LIKE ? AND ut.verified=0
+            ORDER BY ut.completed_at DESC LIMIT 1
+        """, (target_user, f"%{task_name}%"))
+        task = cursor.fetchone()
+        
+        if not task:
+            bot.send_message(message.chat.id, "❌ No pending task found!")
+            return
+        
+        task_id, reward = task
+        
+        cursor.execute("UPDATE user_tasks SET verified=1 WHERE id=?", (task_id,))
+        add_stars(target_user, reward)
+        conn.commit()
+        
+        bot.send_message(message.chat.id, f"✅ Task verified! User got {reward}⭐")
+        
+        try:
+            bot.send_message(target_user, f"✅ Your task has been verified! +{reward}⭐")
+        except:
+            pass
+    except:
+        bot.send_message(message.chat.id, "❌ Usage: /verify_task [user_id] [task_name]")
+
 # ================= HANDLE ALL TEXT MESSAGES =================
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
@@ -1088,16 +1428,27 @@ def handle_all_messages(message):
     # Handle redeem code
     if action_type == "awaiting_code":
         code = text.upper()
-        cursor.execute("SELECT id, amount, used FROM redeem_codes WHERE code=?", (code,))
+        cursor.execute("SELECT id, amount, max_uses, used_count, expires_at, active FROM redeem_codes WHERE code=?", (code,))
         code_data = cursor.fetchone()
         
         if not code_data:
             bot.send_message(message.chat.id, "❌ Invalid code!", reply_markup=main_menu(user_id))
             return
         
-        code_id, amount, used = code_data
-        if used:
-            bot.send_message(message.chat.id, "❌ Code already used!", reply_markup=main_menu(user_id))
+        code_id, amount, max_uses, used_count, expires_at, active = code_data
+        
+        if not active:
+            bot.send_message(message.chat.id, "❌ Code is deactivated!", reply_markup=main_menu(user_id))
+            return
+        
+        if expires_at:
+            expires = datetime.fromisoformat(expires_at)
+            if datetime.now() > expires:
+                bot.send_message(message.chat.id, "❌ Code has expired!", reply_markup=main_menu(user_id))
+                return
+        
+        if used_count >= max_uses:
+            bot.send_message(message.chat.id, "❌ Code has reached maximum uses!", reply_markup=main_menu(user_id))
             return
         
         cursor.execute("SELECT id FROM redeemed_codes WHERE code_id=? AND user_id=?", (code_id, user_id))
@@ -1106,7 +1457,7 @@ def handle_all_messages(message):
             return
         
         add_stars(user_id, amount)
-        cursor.execute("UPDATE redeem_codes SET used=1 WHERE id=?", (code_id,))
+        cursor.execute("UPDATE redeem_codes SET used_count = used_count + 1 WHERE id=?", (code_id,))
         cursor.execute("INSERT INTO redeemed_codes (code_id, user_id) VALUES (?,?)", (code_id, user_id))
         conn.commit()
         
@@ -1114,8 +1465,8 @@ def handle_all_messages(message):
         bot.send_message(message.chat.id, f"✅ Code redeemed! +{amount} 🟡⭐\n\nNew balance: {wallet[1]} 🟡⭐", 
                         reply_markup=main_menu(user_id))
     
-    # Handle withdrawal amount
-    elif action_type == "awaiting_withdraw":
+    # Handle auto withdrawal amount
+    elif action_type == "awaiting_auto_withdraw":
         try:
             amount = int(text)
             if amount < MIN_WITHDRAW:
@@ -1133,18 +1484,148 @@ def handle_all_messages(message):
                 bot.send_message(message.chat.id, f"⏳ Wait {cooldown}s", reply_markup=main_menu(user_id))
                 return
             
+            if not is_admin(user_id) and wallet[6] + amount > MAX_DAILY_WITHDRAW:
+                bot.send_message(message.chat.id, "❌ Daily limit exceeded!", reply_markup=main_menu(user_id))
+                return
+            
             log_action(user_id, "withdraw")
-            cursor.execute("INSERT INTO withdraw_requests (user_id, amount, withdrawal_type) VALUES (?,?,'stars')", 
-                          (user_id, amount))
+            cursor.execute("INSERT INTO withdraw_requests (user_id, amount, withdrawal_type) VALUES (?,?,'stars')", (user_id, amount))
             cursor.execute("UPDATE users_wallet SET daily_withdrawn = daily_withdrawn + ? WHERE user_id=?", (amount, user_id))
             conn.commit()
             
-            bot.send_message(message.chat.id, f"✅ Withdrawal requested! {amount} ⭐️ will be sent soon.", 
+            bot.send_message(message.chat.id, f"✅ Auto withdrawal requested! {amount} ⭐️ will be sent soon.", 
                             reply_markup=main_menu(user_id))
         except:
             bot.send_message(message.chat.id, "❌ Invalid amount!", reply_markup=main_menu(user_id))
     
-    # Handle admin task creation
+    # Handle admin withdrawal amount
+    elif action_type == "awaiting_admin_withdraw":
+        try:
+            amount = int(text)
+            if amount < MIN_WITHDRAW:
+                bot.send_message(message.chat.id, f"❌ Minimum withdrawal is {MIN_WITHDRAW} 🟡⭐", 
+                                reply_markup=main_menu(user_id))
+                return
+            
+            wallet = get_wallet(user_id)
+            if amount > wallet[1]:
+                bot.send_message(message.chat.id, "❌ Insufficient balance!", reply_markup=main_menu(user_id))
+                return
+            
+            if not is_admin(user_id) and wallet[6] + amount > MAX_DAILY_WITHDRAW:
+                bot.send_message(message.chat.id, "❌ Daily limit exceeded!", reply_markup=main_menu(user_id))
+                return
+            
+            cursor.execute("INSERT INTO withdraw_requests (user_id, amount, withdrawal_type) VALUES (?,?,'admin')", (user_id, amount))
+            cursor.execute("UPDATE users_wallet SET daily_withdrawn = daily_withdrawn + ? WHERE user_id=?", (amount, user_id))
+            conn.commit()
+            
+            # Notify admins
+            user_name = get_user_name(user_id)
+            for admin_id in ADMIN_IDS:
+                try:
+                    admin_text = f"""
+🔔 NEW ADMIN WITHDRAWAL REQUEST
+
+👤 User: {user_name}
+🆔 ID: `{user_id}`
+💰 Amount: {amount} 🟡⭐
+
+Use:
+/approve_withdraw {user_id} {amount}
+/reject_withdraw {user_id} {amount}
+"""
+                    bot.send_message(admin_id, admin_text, parse_mode="Markdown")
+                except:
+                    pass
+            
+            bot.send_message(message.chat.id, f"✅ Admin withdrawal requested! {amount} ⭐️ is pending approval.", 
+                            reply_markup=main_menu(user_id))
+        except:
+            bot.send_message(message.chat.id, "❌ Invalid amount!", reply_markup=main_menu(user_id))
+    
+    # Handle code creation - amount
+    elif action_type == "create_code_amount":
+        try:
+            amount = int(text)
+            cursor.execute("INSERT OR REPLACE INTO admin_sessions (admin_id, session_data) VALUES (?,?)", 
+                          (user_id, json.dumps({"amount": amount})))
+            conn.commit()
+            
+            cursor.execute("INSERT OR REPLACE INTO user_actions (user_id, action_type) VALUES (?,?)", (user_id, "create_code_expiry"))
+            conn.commit()
+            
+            bot.send_message(message.chat.id, "📅 Enter expiry days (e.g., 30 for 30 days, 0 for no expiry):")
+        except:
+            bot.send_message(message.chat.id, "❌ Invalid amount!", reply_markup=main_menu(user_id))
+    
+    # Handle code creation - expiry
+    elif action_type == "create_code_expiry":
+        try:
+            days = int(text)
+            data = cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,)).fetchone()
+            if not data:
+                bot.send_message(message.chat.id, "Session expired", reply_markup=main_menu(user_id))
+                return
+            
+            session = json.loads(data[0])
+            session["expiry_days"] = days
+            cursor.execute("UPDATE admin_sessions SET session_data=? WHERE admin_id=?", (json.dumps(session), user_id))
+            cursor.execute("UPDATE user_actions SET action_type=? WHERE user_id=?", ("create_code_uses", user_id))
+            conn.commit()
+            
+            bot.send_message(message.chat.id, "🔄 Enter maximum uses (e.g., 10 for 10 uses, 0 for unlimited):")
+        except:
+            bot.send_message(message.chat.id, "❌ Invalid number!", reply_markup=main_menu(user_id))
+    
+    # Handle code creation - max uses
+    elif action_type == "create_code_uses":
+        try:
+            max_uses = int(text)
+            if max_uses <= 0:
+                max_uses = 999999  # Unlimited
+            
+            data = cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,)).fetchone()
+            if not data:
+                bot.send_message(message.chat.id, "Session expired", reply_markup=main_menu(user_id))
+                return
+            
+            session = json.loads(data[0])
+            amount = session["amount"]
+            expiry_days = session["expiry_days"]
+            
+            # Generate code
+            code = generate_code()
+            
+            # Set expiry
+            expires_at = None
+            if expiry_days > 0:
+                expires_at = datetime.now() + timedelta(days=expiry_days)
+            
+            cursor.execute("""
+                INSERT INTO redeem_codes (code, amount, max_uses, expires_at, created_by) 
+                VALUES (?,?,?,?,?)
+            """, (code, amount, max_uses, expires_at, user_id))
+            
+            cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
+            conn.commit()
+            
+            expiry_text = f"{expiry_days} days" if expiry_days > 0 else "No expiry"
+            uses_text = "Unlimited" if max_uses > 1000 else str(max_uses)
+            
+            bot.send_message(message.chat.id, 
+                           f"✅ Code created: `{code}`\n"
+                           f"Amount: {amount}⭐\n"
+                           f"Expires: {expiry_text}\n"
+                           f"Max Uses: {uses_text}", 
+                           parse_mode="Markdown", reply_markup=main_menu(user_id))
+            
+            if GITHUB_TOKEN and GITHUB_REPO:
+                threading.Thread(target=backup_to_github, args=("new_code", f"Code created for {amount}⭐"), daemon=True).start()
+        except:
+            bot.send_message(message.chat.id, "❌ Invalid number!", reply_markup=main_menu(user_id))
+    
+    # Handle task creation
     elif action_type == "add_task_name":
         cursor.execute("INSERT OR REPLACE INTO admin_sessions (admin_id, session_data) VALUES (?,?)", 
                       (user_id, json.dumps({"name": text})))
@@ -1201,74 +1682,6 @@ def handle_all_messages(message):
             cursor.execute("DELETE FROM user_tasks WHERE task_id=?", (task_id,))
             conn.commit()
             bot.send_message(message.chat.id, f"✅ Task {task_id} deleted!", reply_markup=main_menu(user_id))
-        except:
-            bot.send_message(message.chat.id, "❌ Invalid ID", reply_markup=main_menu(user_id))
-    
-    # Handle code creation
-    elif action_type == "create_code":
-        try:
-            amount = int(text)
-            chars = string.ascii_uppercase + string.digits
-            code = ''.join(random.choices(chars, k=8))
-            code = f"{code[:4]}-{code[4:]}"
-            
-            cursor.execute("INSERT INTO redeem_codes (code, amount, created_by) VALUES (?,?,?)", (code, amount, user_id))
-            conn.commit()
-            
-            bot.send_message(message.chat.id, f"✅ Code created: `{code}`\nAmount: {amount}⭐", 
-                            parse_mode="Markdown", reply_markup=main_menu(user_id))
-            if GITHUB_TOKEN and GITHUB_REPO:
-                threading.Thread(target=backup_to_github, args=("new_code", f"Code created for {amount}⭐"), daemon=True).start()
-        except:
-            bot.send_message(message.chat.id, "❌ Invalid amount", reply_markup=main_menu(user_id))
-    
-    # Handle verification
-    elif action_type == "verify_id":
-        try:
-            verify_id = int(text)
-            cursor.execute("SELECT user_id, task_id FROM user_tasks WHERE id=?", (verify_id,))
-            task = cursor.fetchone()
-            
-            if not task:
-                bot.send_message(message.chat.id, "❌ Verification ID not found", reply_markup=main_menu(user_id))
-                return
-            
-            target_user, task_id = task
-            cursor.execute("SELECT reward FROM tasks WHERE id=?", (task_id,))
-            reward = cursor.fetchone()[0]
-            
-            cursor.execute("UPDATE user_tasks SET verified=1 WHERE id=?", (verify_id,))
-            add_stars(target_user, reward)
-            conn.commit()
-            
-            bot.send_message(message.chat.id, f"✅ Verified! User got {reward}⭐", reply_markup=main_menu(user_id))
-            
-            try:
-                bot.send_message(target_user, f"✅ Your task has been verified! +{reward}⭐")
-            except:
-                pass
-        except:
-            bot.send_message(message.chat.id, "❌ Invalid ID", reply_markup=main_menu(user_id))
-    
-    # Handle withdrawal approval
-    elif action_type == "approve_withdraw":
-        try:
-            req_id = int(text)
-            cursor.execute("SELECT user_id, amount FROM withdraw_requests WHERE id=? AND status='pending'", (req_id,))
-            req = cursor.fetchone()
-            if not req:
-                bot.send_message(message.chat.id, "❌ Request not found", reply_markup=main_menu(user_id))
-                return
-            
-            target_user, amount = req
-            cursor.execute("UPDATE withdraw_requests SET status='approved' WHERE id=?", (req_id,))
-            conn.commit()
-            
-            bot.send_message(message.chat.id, f"✅ Withdrawal {req_id} approved!", reply_markup=main_menu(user_id))
-            try:
-                bot.send_message(target_user, f"✅ Your withdrawal of {amount} ⭐️ has been approved!")
-            except:
-                pass
         except:
             bot.send_message(message.chat.id, "❌ Invalid ID", reply_markup=main_menu(user_id))
 
