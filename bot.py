@@ -1712,4 +1712,337 @@ def handle_all_messages(message):
             
             cooldown = check_cooldown(user_id, "withdraw", WITHDRAWAL_COOLDOWN)
             if cooldown > 0:
-                bot.send_message(message.chat.id, f"
+                bot.send_message(message.chat.id, f"⏳ Wait {cooldown}s", reply_markup=main_menu(user_id))
+                return
+            
+            if not is_admin(user_id) and wallet[6] + amount > MAX_DAILY_WITHDRAW:
+                bot.send_message(message.chat.id, "❌ Daily limit exceeded!", reply_markup=main_menu(user_id))
+                return
+            
+            log_action(user_id, "withdraw")
+            cursor.execute("INSERT INTO withdraw_requests (user_id, amount, withdrawal_type) VALUES (?,?,'stars')", (user_id, amount))
+            cursor.execute("UPDATE users_wallet SET daily_withdrawn = daily_withdrawn + ? WHERE user_id=?", (amount, user_id))
+            conn.commit()
+            
+            bot.send_message(message.chat.id, f"✅ Auto withdrawal requested! {amount} ⭐️ will be sent soon.", 
+                            reply_markup=main_menu(user_id))
+        except:
+            bot.send_message(message.chat.id, "❌ Invalid amount!", reply_markup=main_menu(user_id))
+    
+    # Handle admin withdrawal amount
+    elif action_type == "awaiting_admin_withdraw":
+        cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+        conn.commit()
+        
+        try:
+            amount = int(text)
+            if amount < MIN_WITHDRAW:
+                bot.send_message(message.chat.id, f"❌ Minimum withdrawal is {MIN_WITHDRAW} 🟡⭐", 
+                                reply_markup=main_menu(user_id))
+                return
+            
+            wallet = get_wallet(user_id)
+            if amount > wallet[1]:
+                bot.send_message(message.chat.id, "❌ Insufficient balance!", reply_markup=main_menu(user_id))
+                return
+            
+            if not is_admin(user_id) and wallet[6] + amount > MAX_DAILY_WITHDRAW:
+                bot.send_message(message.chat.id, "❌ Daily limit exceeded!", reply_markup=main_menu(user_id))
+                return
+            
+            cursor.execute("INSERT INTO withdraw_requests (user_id, amount, withdrawal_type) VALUES (?,?,'admin')", (user_id, amount))
+            cursor.execute("UPDATE users_wallet SET daily_withdrawn = daily_withdrawn + ? WHERE user_id=?", (amount, user_id))
+            conn.commit()
+            
+            user_name = get_user_name(user_id)
+            for admin_id in ADMIN_IDS:
+                try:
+                    admin_text = f"""
+🔔 NEW ADMIN WITHDRAWAL REQUEST
+
+👤 User: {user_name}
+🆔 ID: `{user_id}`
+💰 Amount: {amount} 🟡⭐
+
+Use:
+/approve_withdraw {user_id} {amount}
+/reject_withdraw {user_id} {amount}
+"""
+                    bot.send_message(admin_id, admin_text, parse_mode="Markdown")
+                except:
+                    pass
+            
+            bot.send_message(message.chat.id, f"✅ Admin withdrawal requested! {amount} ⭐️ is pending approval.", 
+                            reply_markup=main_menu(user_id))
+        except:
+            bot.send_message(message.chat.id, "❌ Invalid amount!", reply_markup=main_menu(user_id))
+    
+    # Handle code creation - amount
+    elif action_type == "create_code_amount":
+        try:
+            amount = int(text)
+            if amount <= 0:
+                bot.send_message(message.chat.id, "❌ Amount must be positive!", reply_markup=main_menu(user_id))
+                cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+                conn.commit()
+                return
+            
+            # Save amount to session
+            cursor.execute("INSERT OR REPLACE INTO admin_sessions (admin_id, session_data) VALUES (?,?)", 
+                          (user_id, json.dumps({"amount": amount})))
+            
+            # Update action to next step
+            cursor.execute("UPDATE user_actions SET action_type=? WHERE user_id=?", ("create_code_expiry", user_id))
+            conn.commit()
+            
+            bot.send_message(message.chat.id, "📅 **Step 2/3:** Enter expiry days (e.g., 30 for 30 days, 0 for no expiry):")
+        except:
+            bot.send_message(message.chat.id, "❌ Invalid amount! Please enter a number.", reply_markup=main_menu(user_id))
+            cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+            conn.commit()
+    
+    # Handle code creation - expiry
+    elif action_type == "create_code_expiry":
+        try:
+            days = int(text)
+            if days < 0:
+                bot.send_message(message.chat.id, "❌ Days cannot be negative!", reply_markup=main_menu(user_id))
+                cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+                conn.commit()
+                return
+            
+            # Get existing session
+            data = cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,)).fetchone()
+            if not data:
+                bot.send_message(message.chat.id, "Session expired. Please start over.", reply_markup=main_menu(user_id))
+                cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+                conn.commit()
+                return
+            
+            session = json.loads(data[0])
+            session["expiry_days"] = days
+            
+            # Update session
+            cursor.execute("UPDATE admin_sessions SET session_data=? WHERE admin_id=?", (json.dumps(session), user_id))
+            
+            # Update action to next step
+            cursor.execute("UPDATE user_actions SET action_type=? WHERE user_id=?", ("create_code_uses", user_id))
+            conn.commit()
+            
+            bot.send_message(message.chat.id, "🔄 **Step 3/3:** Enter maximum uses (e.g., 10 for 10 users, 0 for unlimited):")
+        except:
+            bot.send_message(message.chat.id, "❌ Invalid number! Please enter a number.", reply_markup=main_menu(user_id))
+            cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+            conn.commit()
+    
+    # Handle code creation - max uses
+    elif action_type == "create_code_uses":
+        try:
+            max_uses = int(text)
+            if max_uses < 0:
+                bot.send_message(message.chat.id, "❌ Max uses cannot be negative!", reply_markup=main_menu(user_id))
+                cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+                conn.commit()
+                return
+            
+            # Set unlimited if 0
+            if max_uses == 0:
+                max_uses = 999999
+            
+            # Get session data
+            data = cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,)).fetchone()
+            if not data:
+                bot.send_message(message.chat.id, "Session expired. Please start over.", reply_markup=main_menu(user_id))
+                cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+                conn.commit()
+                return
+            
+            session = json.loads(data[0])
+            amount = session["amount"]
+            expiry_days = session["expiry_days"]
+            
+            # Generate unique code
+            code = generate_code()
+            
+            # Set expiry date
+            expires_at = None
+            if expiry_days > 0:
+                expires_at = datetime.now() + timedelta(days=expiry_days)
+            
+            # Insert into database
+            cursor.execute("""
+                INSERT INTO redeem_codes (code, amount, max_uses, expires_at, created_by) 
+                VALUES (?,?,?,?,?)
+            """, (code, amount, max_uses, expires_at, user_id))
+            
+            # Clean up
+            cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
+            cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+            conn.commit()
+            
+            expiry_text = f"{expiry_days} days" if expiry_days > 0 else "No expiry"
+            uses_text = "Unlimited" if max_uses > 1000 else str(max_uses)
+            
+            bot.send_message(message.chat.id, 
+                           f"✅ **CODE CREATED SUCCESSFULLY!**\n\n"
+                           f"🎫 **Code:** `{code}`\n"
+                           f"💰 **Amount:** {amount}⭐\n"
+                           f"📅 **Expires:** {expiry_text}\n"
+                           f"🔄 **Max Uses:** {uses_text}", 
+                           parse_mode="Markdown", reply_markup=main_menu(user_id))
+            
+            if GITHUB_TOKEN and GITHUB_REPO:
+                threading.Thread(target=backup_to_github, args=("new_code", f"Code created for {amount}⭐"), daemon=True).start()
+        except:
+            bot.send_message(message.chat.id, "❌ Invalid number! Please enter a number.", reply_markup=main_menu(user_id))
+            cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+            conn.commit()
+    
+    # Handle task creation - name
+    elif action_type == "add_task_name":
+        # Save task name to session
+        cursor.execute("INSERT OR REPLACE INTO admin_sessions (admin_id, session_data) VALUES (?,?)", 
+                      (user_id, json.dumps({"name": text})))
+        
+        # Update action to next step
+        cursor.execute("UPDATE user_actions SET action_type=? WHERE user_id=?", ("add_task_type", user_id))
+        conn.commit()
+        
+        markup = InlineKeyboardMarkup()
+        markup.row(
+            InlineKeyboardButton("📢 CHANNEL", callback_data="task_type_channel"),
+            InlineKeyboardButton("👥 GROUP", callback_data="task_type_group")
+        )
+        markup.row(
+            InlineKeyboardButton("🔗 LINK", callback_data="task_type_link"),
+            InlineKeyboardButton("🎥 VIDEO", callback_data="task_type_video")
+        )
+        bot.send_message(message.chat.id, "📌 **Step 2/4:** Choose task type:", reply_markup=markup, parse_mode="Markdown")
+    
+    # Handle task creation - data (this is triggered by the callback, not a message)
+    # This is handled by the task_type_callback function
+    
+    # Handle task creation - reward
+    elif action_type == "add_task_reward":
+        try:
+            reward = int(text)
+            if reward <= 0:
+                bot.send_message(message.chat.id, "❌ Reward must be positive!", reply_markup=main_menu(user_id))
+                cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+                conn.commit()
+                return
+            
+            # Get session data
+            data = cursor.execute("SELECT session_data FROM admin_sessions WHERE admin_id=?", (user_id,)).fetchone()
+            if not data:
+                bot.send_message(message.chat.id, "Session expired. Please start over.", reply_markup=main_menu(user_id))
+                cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+                conn.commit()
+                return
+            
+            task = json.loads(data[0])
+            
+            # Insert task into database
+            cursor.execute("""
+                INSERT INTO tasks (task_name, task_type, task_data, reward, created_by) 
+                VALUES (?,?,?,?,?)
+            """, (task["name"], task["type"], task["data"], reward, user_id))
+            
+            # Clean up
+            cursor.execute("DELETE FROM admin_sessions WHERE admin_id=?", (user_id,))
+            cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+            conn.commit()
+            
+            bot.send_message(message.chat.id, 
+                           f"✅ **TASK CREATED SUCCESSFULLY!**\n\n"
+                           f"📋 **Name:** {task['name']}\n"
+                           f"💰 **Reward:** {reward}⭐\n"
+                           f"📌 **Type:** {task['type']}\n"
+                           f"🔗 **Data:** {task['data']}", 
+                           parse_mode="Markdown", reply_markup=main_menu(user_id))
+            
+            if GITHUB_TOKEN and GITHUB_REPO:
+                threading.Thread(target=backup_to_github, args=("new_task", f"Task created: {task['name']}"), daemon=True).start()
+        except:
+            bot.send_message(message.chat.id, "❌ Invalid number! Please enter a number.", reply_markup=main_menu(user_id))
+            cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+            conn.commit()
+    
+    # Handle task deletion
+    elif action_type == "del_task":
+        cursor.execute("DELETE FROM user_actions WHERE user_id=?", (user_id,))
+        conn.commit()
+        
+        try:
+            task_id = int(text)
+            
+            # Check if task exists
+            cursor.execute("SELECT task_name FROM tasks WHERE id=?", (task_id,))
+            task = cursor.fetchone()
+            if not task:
+                bot.send_message(message.chat.id, f"❌ Task ID {task_id} not found!", reply_markup=main_menu(user_id))
+                return
+            
+            task_name = task[0]
+            
+            cursor.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+            cursor.execute("DELETE FROM user_tasks WHERE task_id=?", (task_id,))
+            conn.commit()
+            
+            bot.send_message(message.chat.id, f"✅ Task '{task_name}' (ID: {task_id}) deleted successfully!", 
+                            reply_markup=main_menu(user_id))
+            
+            if GITHUB_TOKEN and GITHUB_REPO:
+                threading.Thread(target=backup_to_github, args=("delete_task", f"Task deleted: {task_name}"), daemon=True).start()
+        except:
+            bot.send_message(message.chat.id, "❌ Invalid ID! Please enter a number.", reply_markup=main_menu(user_id))
+
+# ================= ADMIN DAILY BONUS =================
+def daily_admin_bonus():
+    while True:
+        time.sleep(86400)
+        reset_daily_withdrawals()
+        for admin in ADMIN_IDS:
+            cursor.execute("UPDATE users_wallet SET stars = stars + 100 WHERE user_id=?", (admin,))
+        conn.commit()
+        print("✅ Admin daily bonus added")
+
+threading.Thread(target=daily_admin_bonus, daemon=True).start()
+
+# ================= WEBHOOK SETUP =================
+def setup_webhook():
+    render_url = os.getenv("RENDER_EXTERNAL_URL")
+    if render_url:
+        webhook_url = f"{render_url}/{TOKEN}"
+        bot.remove_webhook()
+        time.sleep(1)
+        bot.set_webhook(url=webhook_url)
+        print(f"✅ Webhook set to: {webhook_url}")
+        return True
+    return False
+
+# ================= MAIN =================
+if __name__ == "__main__":
+    print("=" * 50)
+    print("⚡ PULSE PROFIT BOT ⚡")
+    print("=" * 50)
+    print(f"👑 Admins: {len(ADMIN_IDS)}")
+    print(f"📢 Channel: {REQUIRED_CHANNEL}")
+    print(f"💰 Earning System: Active")
+    print(f"👥 Referral System: Active")
+    print(f"💳 Withdrawal System: Active")
+    print(f"⭐ Telegram Stars: Active")
+    print(f"📋 Task System: Active")
+    print(f"🎫 Redeem Code System: Active")
+    print(f"👑 Admin Panel: Active")
+    print(f"💾 GitHub Backup: {'Active' if GITHUB_TOKEN and GITHUB_REPO else 'Disabled'}")
+    print("=" * 50)
+    
+    setup_webhook()
+    
+    if RENDER_EXTERNAL_URL:
+        keep_alive.health_url = f"{RENDER_EXTERNAL_URL}/health"
+        keep_alive.start()
+    
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
